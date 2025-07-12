@@ -11,12 +11,8 @@ from win10toast import ToastNotifier
 
 class FlightBot:
     """
-    A simple flight-price checker that scrapes Kayak once,
-    converts the price from INR to EUR, and prints it.
+    A simple flight-price checker that scrapes Kayak once.
     """
-
-    # Approximate conversion rate INR→EUR
-    EXCHANGE_RATE = 0.012
 
     def __init__(
         self,
@@ -46,9 +42,9 @@ class FlightBot:
 
     def _get_current_price(self) -> float:
         """
-        Launch Chrome, reject cookie popup if present, scrape all detected prices,
-        interpret values in EUR if marked with '€' or convert from INR otherwise,
-        print the list of detected EUR prices, and return the lowest price.
+        Launch Chrome, reject cookie popup if present, scrape each
+        round-trip result’s price and its outbound/return durations,
+        print them, and return the lowest price in EUR.
         """
         options = webdriver.ChromeOptions()
         options.add_experimental_option("excludeSwitches", ["enable-logging"])
@@ -75,27 +71,39 @@ class FlightBot:
         driver.quit()
 
         soup = BeautifulSoup(html, "html.parser")
-        eur_prices = []
-        for div in soup.find_all("div", class_="e2GB-price-text"):
-            txt = div.get_text().strip()
+        results = soup.find_all("div", class_="Fxw9-result-item-container")
+
+        all_prices = []
+        for result in results:
+            # price
+            price_div = result.find("div", class_="e2GB-price-text")
+            txt = price_div.get_text().strip() if price_div else ""
             digits = "".join(filter(str.isdigit, txt))
             if not digits:
                 continue
-            amount = int(digits)
-            if "€" in txt:
-                eur_prices.append(amount)
-            else:
-                eur_prices.append(round(amount * self.EXCHANGE_RATE, 2))
+            price_eur = int(digits)
 
-        if not eur_prices:
-            return None  # type: ignore
+            # durations: outbound then return
+            leg_divs = result.find_all(
+                "div", class_="xdW8 xdW8-mod-full-airport"
+            )
+            durations = []
+            for leg in leg_divs:
+                dur_div = leg.find(
+                    "div", class_="vmXl vmXl-mod-variant-default"
+                )
+                if dur_div:
+                    durations.append(dur_div.get_text().strip())
+            outward = durations[0] if len(durations) > 0 else "N/A"
+            ret = durations[1] if len(durations) > 1 else "N/A"
 
-        # show all detected EUR prices
-        print(
-            "  Detected prices: " + ", ".join(f"€{p:.2f}" for p in eur_prices)
-        )
+            print(
+                f"  Flight: €{price_eur}, "
+                f"Outbound: {outward}, Return: {ret}"
+            )
+            all_prices.append(price_eur)
 
-        return min(eur_prices)
+        return min(all_prices) if all_prices else None  # type: ignore
 
     def _show_notification(self, price: float):
         """
@@ -122,6 +130,6 @@ class FlightBot:
             return
 
         print(f"  💰 Best price: €{price:.2f}")
-        if price <= self.price_limit * self.EXCHANGE_RATE:
+        if price <= self.price_limit:
             print("  ✅ Price is below limit! Showing notification…")
             self._show_notification(price)
