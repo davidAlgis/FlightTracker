@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools >=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "FlightTracker"
+version = "0.1.0"
+description = "A small tool to track the price of some flights"
+readme = "README.md"
+requires-python = ">=3.7"
+license = { file = "LICENSE" }
+authors = [
+    {name = "David Algis", email = "david.algis@tutamail.com"}
+]
+
+# Runtime dependencies
+dependencies = [
+  "numpy>=1.21.0",
+  "selenium>=4.0.0",
+  "beautifulsoup4>=4.9.0",
+  "pandas>=1.3.0",
+]
+
+# Optional project URLs
+[project.urls]
+Homepage   = "https://github.com/davidAlgis/FlightTracker"
+Repository = "https://github.com/davidAlgis/FlightTracker"
+
+# Define a console script so users can run `flighttracker`
+[project.scripts]
+flighttracker = "main:main"
+
+[tool.flake8]
+max-line-length = 85
+exclude = ["tests/*", "Tests/*"]
+
+[tool.setuptools]
+# we have three standalone modules at the top level
+py-modules = ["flight_bot", "gui", "main"]
