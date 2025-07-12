@@ -1,3 +1,5 @@
+# country_to_airport.py
+
 #!/usr/bin/env python3
 """
 Module providing CountryToAirport, a class to map a country name or ISO code
@@ -29,7 +31,6 @@ class CountryToAirport:
         :raises ValueError: If no matching country is found.
         """
         code = country_input.strip()
-        # If not a valid 2-letter code, match by name
         if (
             len(code) != 2
             or code.upper() not in self.countries_df["code"].values
@@ -54,18 +55,24 @@ class CountryToAirport:
 
     def get_airports(self, country_input):
         """
-        Get all IATA airport codes and names for the given country.
+        Get all IATA airport codes and names for the given country,
+        filtered to only those with scheduled (commercial) service.
 
         :param country_input: Partial country name or 2-letter ISO code.
         :return: List of tuples (iata_code, airport_name).
         """
         code, name = self.detect_country(country_input)
-        # Debug: show detected country code and name
+
+        # DEBUG: show detected country code and name
         print(f"Detected country: {name} ({code})", file=sys.stderr)
 
         subset = self.airports_df[
             (self.airports_df["iso_country"] == code)
             & self.airports_df["iata_code"].notna()
+            & (
+                self.airports_df["scheduled_service"].fillna("").str.lower()
+                == "yes"
+            )
         ]
 
         airports = [

@@ -1,10 +1,11 @@
+# airport_from_distance.py
+
 #!/usr/bin/env python3
 """
-Approximate airport reachability by train without any API key.
-Uses straight-line distance and an average train speed.
+Module providing AirportFromDistance, a class to find all IATA airports
+reachable by train (approximated) from a given city within a specified duration.
 """
 
-import argparse
 import sys
 from math import atan2, cos, radians, sin, sqrt
 
@@ -21,7 +22,7 @@ class AirportFromDistance:
     def __init__(self):
         """Load airport data and initialize the geolocator."""
         self.airports_df = pd.read_csv(self.AIRPORTS_URL)
-        self.geolocator = Nominatim(user_agent="airport_distance_simple")
+        self.geolocator = Nominatim(user_agent="airport_distance")
 
     def detect_city(self, city):
         """
@@ -54,49 +55,33 @@ class AirportFromDistance:
 
     def get_airports(self, city, max_duration):
         """
-        Get all IATA airports reachable within max_duration minutes.
+        Get all IATA airports reachable within max_duration minutes,
+        filtered to only those with scheduled (commercial) service.
 
         :param city: Starting city name.
         :param max_duration: Maximum train travel time in minutes.
         :return: List of tuples (iata_code, airport_name).
         """
         lat, lon = self.detect_city(city)
-        # Convert max_duration to max_distance using average speed
         max_distance = self.AVERAGE_TRAIN_SPEED_KMH * (max_duration / 60.0)
-        subset = self.airports_df[self.airports_df["iata_code"].notna()]
-        result = []
+
+        subset = self.airports_df[
+            self.airports_df["iata_code"].notna()
+            & (
+                self.airports_df["scheduled_service"].fillna("").str.lower()
+                == "yes"
+            )
+        ]
+
+        valid = []
         for _, row in subset.iterrows():
             dist = self.haversine_distance(
-                lat, lon, row["latitude_deg"], row["longitude_deg"]
+                lat,
+                lon,
+                row["latitude_deg"],
+                row["longitude_deg"],
             )
             if dist <= max_distance:
-                result.append((row["iata_code"], row["name"]))
-        return result
+                valid.append((row["iata_code"], row["name"]))
 
-
-def main():
-    """CLI entry point: parse args and print reachable airports."""
-    parser = argparse.ArgumentParser(
-        description=(
-            "List IATA airports reachable by train from a starting city "
-            "within a given duration (minutes), approximated by distance."
-        )
-    )
-    parser.add_argument("city", help="Starting city name")
-    parser.add_argument(
-        "duration", type=float, help="Max travel time by train (minutes)"
-    )
-    args = parser.parse_args()
-
-    finder = AirportFromDistance()
-    try:
-        airports = finder.get_airports(args.city, args.duration)
-    except ValueError as e:
-        sys.exit(str(e))
-
-    for code, name in airports:
-        print(f"{code} - {name}")
-
-
-if __name__ == "__main__":
-    main()
+        return valid
