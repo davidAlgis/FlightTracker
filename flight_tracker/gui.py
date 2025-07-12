@@ -63,7 +63,7 @@ class FlightBotGUI(tk.Tk):
                 False,
             ),
             ("Trip Duration (days)\n(e.g. 3 or 3-7)", "trip_duration", False),
-            ("Price Limit (₹)", "price_limit", False),
+            ("Price Limit (€)", "price_limit", False),
             ("Checking Interval (s)", "checking_interval", False),
             ("Total Duration (s)", "checking_duration", False),
         ]
