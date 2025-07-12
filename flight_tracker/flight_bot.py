@@ -1,17 +1,17 @@
-# flight_bot.py
-
 import time
 
 from bs4 import BeautifulSoup
 from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 from win10toast import ToastNotifier
 
 
 class FlightBot:
     """
-    A simple flight-price monitor that checks Kayak periodically
-    and shows a Windows 11 toast notification when the price
-    drops below a threshold.
+    A simple flight-price monitor that checks Kayak once
+    and prints the best price.
     """
 
     def __init__(
@@ -46,14 +46,28 @@ class FlightBot:
         self.notifier = ToastNotifier()
 
     def _get_current_price(self):
-        """Launches Chrome, scrapes the best price on the page, returns it as int (or None)."""
+        """
+        Launch Chrome, reject cookies if prompted, scrape the best price on the page,
+        and return it as int (or None).
+        """
+        options = webdriver.ChromeOptions()
+        options.add_experimental_option("excludeSwitches", ["enable-logging"])
         driver = (
-            webdriver.Chrome(self.driver_path)
+            webdriver.Chrome(self.driver_path, options=options)
             if self.driver_path
-            else webdriver.Chrome()
+            else webdriver.Chrome(options=options)
         )
         driver.get(self.url)
-        # wait for results to load
+        try:
+            button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable(
+                    (By.XPATH, "//button[.//div[text()='Reject all']]")
+                )
+            )
+            button.click()
+        except Exception:
+            pass
+
         time.sleep(30)
         page_source = driver.page_source
         driver.quit()
@@ -77,22 +91,20 @@ class FlightBot:
         self.notifier.show_toast(title, message, duration=10, threaded=True)
 
     def start(self):
-        """Run the periodic check. Stops as soon as price ≤ limit."""
-        for check_num in range(1, self.num_checks + 1):
-            print(
-                f"[{check_num}/{self.num_checks}] Checking price for "
-                f"{self.departure}→{self.destination} on {self.dep_date}…"
-            )
+        """
+        Check the current best flight price once and print the result.
+        """
+        print(
+            f"Checking best price for "
+            f"{self.departure}→{self.destination} on {self.dep_date}…"
+        )
+        try:
             price = self._get_current_price()
-            if price is None:
-                print("  ❌ Failed to find any prices. Retrying later…")
-            else:
-                print(f"  💰 Current price: ₹{price}")
-                if price <= self.price_limit:
-                    print("  ✅ Price is below limit! Showing notification…")
-                    self._show_notification(price)
-                    print("  🔔 Notification sent. Stopping monitor.")
-                    return
-            if check_num < self.num_checks:
-                time.sleep(self.checking_interval)
-        print("Finished all checks; price never dropped below threshold.")
+        except Exception as e:
+            print(f"  ❌ Error fetching price: {e}")
+            return
+
+        if price is None:
+            print("  ❌ Failed to find any prices.")
+        else:
+            print(f"  💰 Best price: ₹{price}")
