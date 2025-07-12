@@ -2,3 +2,4 @@ __pycache__/
 .mypy_cache/
 FlightTracker.egg-info/
 *.sublime-workspace
+config.json
