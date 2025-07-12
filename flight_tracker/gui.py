@@ -2,10 +2,12 @@
 """
 GUI for the Flight Price Monitor. Supports:
 - Lists of IATA codes (e.g. DEL,BOM)
-- “City, Country” inputs with transport-time lookup
+- City, Country inputs with transport-time lookup
 - Country-only inputs listing all airports
 - Date domains for departure and return dates (YYYY-MM-DD or YYYY-MM-DD-YYYY-MM-DD)
 - Trip-duration domains (days, e.g. 3 or 3-7)
+- Confirmation of total number of monitoring tasks before starting
+- Load and save of last search config to config.json
 """
 
 import itertools
@@ -17,17 +19,18 @@ from tkinter import messagebox, simpledialog
 from flight_tracker.airport_from_distance import AirportFromDistance
 from flight_tracker.country_to_airport import CountryToAirport
 from flight_tracker.flight_bot import FlightBot
+from flight_tracker.load_config import ConfigManager
 
 
 class FlightBotGUI(tk.Tk):
     """
     A Tkinter GUI that collects routes, dates (or date ranges),
     and optional trip-duration ranges, then starts FlightBot
-    instances for every combination.
+    instances for every combination. Remembers last inputs.
     """
 
     def __init__(self):
-        """Initialize window and form fields."""
+        """Initialize window, form fields, and load saved configuration."""
         super().__init__()
         self.title("Flight Price Monitor")
         self.resizable(False, False)
@@ -76,6 +79,13 @@ class FlightBotGUI(tk.Tk):
         )
         start_btn.grid(row=len(fields), column=0, columnspan=2, pady=10)
 
+        # Load and apply saved configuration
+        self.config_mgr = ConfigManager()
+        saved = self.config_mgr.load()
+        for key, entry in self.entries.items():
+            if key in saved:
+                entry.insert(0, str(saved[key]))
+
     def _resolve_airports(self, input_str):
         """
         Resolve an input string into a list of IATA codes.
@@ -112,7 +122,6 @@ class FlightBotGUI(tk.Tk):
         """
         parts = date_str.strip().split("-")
         if len(parts) == 3:
-            # single date
             return [datetime.strptime(date_str, "%Y-%m-%d")]
         if len(parts) == 6:
             start = "-".join(parts[0:3])
@@ -146,8 +155,8 @@ class FlightBotGUI(tk.Tk):
     def start_monitor(self):
         """
         Gather inputs, build lists of departures, destinations,
-        and (departure, return) date pairs from date or duration domains,
-        then spawn FlightBot threads for each route × date pair.
+        and (departure, return) date pairs, then confirm the total
+        number of tasks with the user before spawning FlightBot threads.
         """
         try:
             deps = self._resolve_airports(
@@ -156,23 +165,21 @@ class FlightBotGUI(tk.Tk):
             dests = self._resolve_airports(
                 self.entries["destination"].get().strip()
             )
-            # parse date domains
             dep_dates = self._parse_date_list(
                 self.entries["dep_date"].get().strip()
             )
             trip_dur_str = self.entries["trip_duration"].get().strip()
             if trip_dur_str:
-                # build return dates from trip durations
                 durations = self._parse_duration_list(trip_dur_str)
-                date_pairs = []
-                for d in dep_dates:
-                    for dur in durations:
-                        ret = d + timedelta(days=dur)
-                        date_pairs.append(
-                            (d.strftime("%Y-%m-%d"), ret.strftime("%Y-%m-%d"))
-                        )
+                date_pairs = [
+                    (
+                        d.strftime("%Y-%m-%d"),
+                        (d + timedelta(days=dur)).strftime("%Y-%m-%d"),
+                    )
+                    for d in dep_dates
+                    for dur in durations
+                ]
             else:
-                # parse return-date domain
                 ret_dates = self._parse_date_list(
                     self.entries["arrival_date"].get().strip()
                 )
@@ -181,36 +188,48 @@ class FlightBotGUI(tk.Tk):
                     for d, r in itertools.product(dep_dates, ret_dates)
                 ]
 
-            params = {}
-            for name in (
-                "price_limit",
-                "checking_interval",
-                "checking_duration",
-            ):
-                params[name] = int(self.entries[name].get().strip())
+            params = {
+                name: int(self.entries[name].get().strip())
+                for name in (
+                    "price_limit",
+                    "checking_interval",
+                    "checking_duration",
+                )
+            }
         except ValueError as e:
             messagebox.showerror("Invalid input", str(e))
             return
 
-        for dep_airport, dest_airport in itertools.product(deps, dests):
-            for dep_date, ret_date in date_pairs:
-                bot = FlightBot(
-                    departure=dep_airport,
-                    destination=dest_airport,
-                    dep_date=dep_date,
-                    arrival_date=ret_date,
-                    price_limit=params["price_limit"],
-                    checking_interval=params["checking_interval"],
-                    checking_duration=params["checking_duration"],
-                )
-                thread = threading.Thread(target=bot.start, daemon=True)
-                thread.start()
-
-        messagebox.showinfo(
-            "FlightBot",
-            "Monitoring started for all routes and date pairs "
-            "in the background.",
+        total_tasks = len(deps) * len(dests) * len(date_pairs)
+        confirm = messagebox.askyesno(
+            "Confirm Tasks",
+            f"{total_tasks} monitoring tasks will be started. Continue?",
         )
+        if not confirm:
+            return
+
+        # Save current search configuration
+        config = {key: self.entries[key].get().strip() for key in self.entries}
+        self.config_mgr.save(config)
+
+        # for dep_airport, dest_airport in itertools.product(deps, dests):
+        #     for dep_date, ret_date in date_pairs:
+        #         bot = FlightBot(
+        #             departure=dep_airport,
+        #             destination=dest_airport,
+        #             dep_date=dep_date,
+        #             arrival_date=ret_date,
+        #             price_limit=params["price_limit"],
+        #             checking_interval=params["checking_interval"],
+        #             checking_duration=params["checking_duration"],
+        #         )
+        #         thread = threading.Thread(target=bot.start, daemon=True)
+        #         thread.start()
+
+        # messagebox.showinfo(
+        #     "FlightBot",
+        #     "Monitoring started for all routes and date pairs in the background.",
+        # )
         self.quit()
 
 
