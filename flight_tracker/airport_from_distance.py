@@ -4,6 +4,7 @@
 """
 Module providing AirportFromDistance, a class to find all IATA airports
 reachable by train (approximated) from a given city within a specified duration.
+Only scheduled, international airports are returned.
 """
 
 import sys
@@ -14,7 +15,7 @@ from geopy.geocoders import Nominatim
 
 
 class AirportFromDistance:
-    """Find airports reachable within an approximate train travel time."""
+    """Find scheduled international airports reachable within an approximate train time."""
 
     AIRPORTS_URL = "https://ourairports.com/data/airports.csv"
     AVERAGE_TRAIN_SPEED_KMH = 80  # assumed average train speed
@@ -56,7 +57,7 @@ class AirportFromDistance:
     def get_airports(self, city, max_duration):
         """
         Get all IATA airports reachable within max_duration minutes,
-        filtered to only those with scheduled (commercial) service.
+        filtered to only scheduled, international airports.
 
         :param city: Starting city name.
         :param max_duration: Maximum train travel time in minutes.
@@ -71,6 +72,7 @@ class AirportFromDistance:
                 self.airports_df["scheduled_service"].fillna("").str.lower()
                 == "yes"
             )
+            & (self.airports_df["type"] == "large_airport")
         ]
 
         valid = []

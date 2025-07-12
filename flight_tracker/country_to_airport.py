@@ -3,7 +3,7 @@
 #!/usr/bin/env python3
 """
 Module providing CountryToAirport, a class to map a country name or ISO code
-to its IATA airport codes and names using OurAirports data.
+to its international IATA airport codes and names using OurAirports data.
 """
 
 import sys
@@ -12,7 +12,7 @@ import pandas as pd
 
 
 class CountryToAirport:
-    """Map a country name or 2-letter ISO code to its IATA airports."""
+    """Map a country name or 2-letter ISO code to its international IATA airports."""
 
     COUNTRIES_URL = "https://ourairports.com/data/countries.csv"
     AIRPORTS_URL = "https://ourairports.com/data/airports.csv"
@@ -56,7 +56,7 @@ class CountryToAirport:
     def get_airports(self, country_input):
         """
         Get all IATA airport codes and names for the given country,
-        filtered to only those with scheduled (commercial) service.
+        filtered to only scheduled, international airports.
 
         :param country_input: Partial country name or 2-letter ISO code.
         :return: List of tuples (iata_code, airport_name).
@@ -73,6 +73,7 @@ class CountryToAirport:
                 self.airports_df["scheduled_service"].fillna("").str.lower()
                 == "yes"
             )
+            & (self.airports_df["type"] == "large_airport")
         ]
 
         airports = [
