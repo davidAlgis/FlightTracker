@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.7"
 license = { file = "LICENSE" }
 authors = [
-    {name = "David Algis", email = "david.algis@tutamail.com"}
+    { name = "David Algis", email = "david.algis@tutamail.com" }
 ]
 
 # Runtime dependencies
@@ -28,12 +28,12 @@ Repository = "https://github.com/davidAlgis/FlightTracker"
 
 # Define a console script so users can run `flighttracker`
 [project.scripts]
-flighttracker = "main:main"
+flighttracker = "flight_tracker.__main__:main"
 
 [tool.flake8]
 max-line-length = 85
 exclude = ["tests/*", "Tests/*"]
 
 [tool.setuptools]
-# we have three standalone modules at the top level
-py-modules = ["flight_bot", "gui", "main"]
+# Install the flight_tracker directory as a package
+packages = ["flight_tracker"]
