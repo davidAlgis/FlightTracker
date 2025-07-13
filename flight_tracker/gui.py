@@ -65,18 +65,17 @@ class FlightBotGUI(tk.Tk):
             ("Trip Duration (days)\n(e.g. 3 or 3-7)", "trip_duration", False),
             ("Max Flight Duration (h)", "max_duration_flight", False),
             ("Price Limit (€)", "price_limit", False),
-            ("Checking Interval (s)", "checking_interval", False),
-            ("Total Duration (s)", "checking_duration", False),
         ]
 
         self.entries = {}
         for idx, (label, name, multiline) in enumerate(fields):
             lbl = tk.Label(self, text=label)
             lbl.grid(row=idx, column=0, padx=8, pady=4, sticky="ne")
-            if multiline:
-                widget = tk.Text(self, width=60, height=4)
-            else:
-                widget = tk.Entry(self, width=40)
+            widget = (
+                tk.Text(self, width=60, height=4)
+                if multiline
+                else tk.Entry(self, width=40)
+            )
             widget.grid(row=idx, column=1, padx=8, pady=4, sticky="w")
             self.entries[name] = widget
 
@@ -92,8 +91,7 @@ class FlightBotGUI(tk.Tk):
         self.resolved_airports = {}
         for field in ("departure", "destination"):
             self.entries[field].bind(
-                "<FocusOut>",
-                lambda ev, f=field: self._pre_resolve_airports(f),
+                "<FocusOut>", lambda ev, f=field: self._pre_resolve_airports(f)
             )
 
         self.start_btn = tk.Button(
@@ -136,10 +134,7 @@ class FlightBotGUI(tk.Tk):
             widget.insert(0, text)
 
     def _pre_resolve_airports(self, field):
-        """
-        Resolve and replace airport entries with "CODE - Name" on focus out.
-        Skips re-resolving if already in CODE - Name format.
-        """
+        """Resolve airports to 'CODE - Name' on field leave."""
         widget = self.entries[field]
         raw = self._get_widget_value(widget)
         if not raw:
@@ -154,10 +149,7 @@ class FlightBotGUI(tk.Tk):
         except ValueError as e:
             messagebox.showerror("Invalid input", f"{field.title()}: {e}")
             return
-        display = []
-        for code in codes:
-            name = self.code_to_name.get(code, "")
-            display.append(f"{code} - {name}" if name else code)
+        display = [f"{c} - {self.code_to_name.get(c,'')}" for c in codes]
         self._set_widget_value(widget, ",".join(display))
         self.resolved_airports[field] = codes
         cfg = self.config_mgr.load()
@@ -166,7 +158,7 @@ class FlightBotGUI(tk.Tk):
         self.config_mgr.save(cfg)
 
     def _resolve_airports(self, input_str):
-        """Convert input string to list of IATA codes."""
+        """Convert input to IATA codes list."""
         tokens = [t.strip() for t in input_str.split(",") if t.strip()]
         if all(len(t) == 3 and t.isalpha() and t.isupper() for t in tokens):
             return tokens
@@ -179,16 +171,16 @@ class FlightBotGUI(tk.Tk):
             )
             if duration is None:
                 raise ValueError("Operation cancelled")
-            finder = AirportFromDistance()
             return [
                 c
-                for c, _ in finder.get_airports(f"{city}, {country}", duration)
+                for c, _ in AirportFromDistance().get_airports(
+                    f"{city}, {country}", duration
+                )
             ]
-        finder = CountryToAirport()
-        return [c for c, _ in finder.get_airports(input_str)]
+        return [c for c, _ in CountryToAirport().get_airports(input_str)]
 
     def _parse_date_list(self, date_str):
-        """Parse a date or date-range string into datetime list."""
+        """Parse date or date range into datetimes."""
         parts = date_str.strip().split("-")
         if len(parts) == 3:
             return [datetime.strptime(date_str, "%Y-%m-%d")]
@@ -198,12 +190,12 @@ class FlightBotGUI(tk.Tk):
             d0 = datetime.strptime(start, "%Y-%m-%d")
             d1 = datetime.strptime(end, "%Y-%m-%d")
             if d1 < d0:
-                raise ValueError(f"End date {end} before start {start}")
+                raise ValueError("End date before start")
             return [d0 + timedelta(days=i) for i in range((d1 - d0).days + 1)]
         raise ValueError("Invalid date format")
 
     def _parse_duration_list(self, dur_str):
-        """Parse duration or range into list of ints."""
+        """Parse trip-duration domain into list of ints."""
         parts = dur_str.strip().split("-")
         if len(parts) == 1:
             return [int(parts[0])]
@@ -216,8 +208,8 @@ class FlightBotGUI(tk.Tk):
 
     def start_monitor(self):
         """
-        Collect inputs, confirm task count, save config, then
-        start a background thread that runs FlightBots in sequence.
+        Gather inputs, confirm count, save config, then run FlightBots
+        in background thread with a progress bar.
         """
         try:
             for side in ("departure", "destination"):
@@ -247,18 +239,13 @@ class FlightBotGUI(tk.Tk):
                     (d.strftime("%Y-%m-%d"), r.strftime("%Y-%m-%d"))
                     for d, r in itertools.product(dep_dates, ret_dates)
                 ]
+
             params = {
                 "max_duration_flight": float(
                     self._get_widget_value(self.entries["max_duration_flight"])
                 ),
                 "price_limit": int(
                     self._get_widget_value(self.entries["price_limit"])
-                ),
-                "checking_interval": int(
-                    self._get_widget_value(self.entries["checking_interval"])
-                ),
-                "checking_duration": int(
-                    self._get_widget_value(self.entries["checking_duration"])
                 ),
             }
         except ValueError as e:
@@ -271,9 +258,7 @@ class FlightBotGUI(tk.Tk):
         ):
             return
 
-        cfg = {}
-        for key, widget in self.entries.items():
-            cfg[key] = self._get_widget_value(widget)
+        cfg = {k: self._get_widget_value(w) for k, w in self.entries.items()}
         cfg["departure_codes"] = deps
         cfg["destination_codes"] = dests
         cfg["max_duration_flight"] = params["max_duration_flight"]
@@ -290,22 +275,17 @@ class FlightBotGUI(tk.Tk):
         thread.start()
 
     def _run_bots(self, deps, dests, date_pairs, params):
-        """
-        Run FlightBot.start() for each route/date in a background thread.
-        """
+        """Run FlightBot.start() for each route/date pair in background."""
         for dep, dest in itertools.product(deps, dests):
             for dd, rd in date_pairs:
-                bot = FlightBot(
+                FlightBot(
                     departure=dep,
                     destination=dest,
                     dep_date=dd,
                     arrival_date=rd,
                     price_limit=params["price_limit"],
-                    checking_interval=params["checking_interval"],
-                    checking_duration=params["checking_duration"],
                     max_duration_flight=params["max_duration_flight"],
-                )
-                bot.start()
+                ).start()
         self.progress.stop()
         messagebox.showinfo(
             "FlightBot", "All monitoring tasks have completed."

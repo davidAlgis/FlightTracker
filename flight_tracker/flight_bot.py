@@ -23,18 +23,18 @@ class FlightBot:
         dep_date: str,
         arrival_date: str,
         price_limit: int,
-        checking_interval: int,
-        checking_duration: int,
         max_duration_flight: float,
         driver_path: str = None,
     ):
+        """
+        Initialize FlightBot with route, dates, price limit,
+        and max one-way/round-trip duration in hours.
+        """
         self.departure = departure
         self.destination = destination
         self.dep_date = dep_date
         self.arrival_date = arrival_date
         self.price_limit = price_limit
-        self.checking_interval = checking_interval
-        self.checking_duration = checking_duration
         self.max_duration_flight = max_duration_flight
         self.url = (
             f"https://www.kayak.fr/flights/"
@@ -59,8 +59,9 @@ class FlightBot:
 
     def _get_current_price(self) -> float:
         """
-        Launch headless Firefox, reject cookie popup if present, scrape each
-        round-trip result’s price and durations, print them, and return the lowest price.
+        Scrape each round-trip result’s price and durations,
+        filter out any whose outbound or return exceeds max_duration_flight,
+        print each matching flight, and return the lowest price.
         """
         options = Options()
         # options.headless = True
@@ -106,13 +107,13 @@ class FlightBot:
             leg_divs = result.find_all(
                 "div", class_="xdW8 xdW8-mod-full-airport"
             )
-            durations = []
+            dur_texts = []
             for leg in leg_divs:
                 dv = leg.find("div", class_="vmXl vmXl-mod-variant-default")
                 if dv:
-                    durations.append(dv.get_text().strip())
-            outward = durations[0] if len(durations) > 0 else "N/A"
-            ret = durations[1] if len(durations) > 1 else "N/A"
+                    dur_texts.append(dv.get_text().strip())
+            outward = dur_texts[0] if len(dur_texts) > 0 else ""
+            ret = dur_texts[1] if len(dur_texts) > 1 else ""
 
             # filter by max_duration_flight
             ok = True
