@@ -3,11 +3,13 @@
 GUI for the Flight Price Monitor. Divided into three resizable zones:
 
 #1 (left): search configuration fields
-#2 (right): best-flight display
-#3 (bottom): status panel with progress bar and current action
+#2 (right): best-flight and historical graph
+#3 (bottom): status panel with current action label above the progress bar
 """
 
 import itertools
+import json
+import os
 import re
 import threading
 import time
@@ -15,7 +17,12 @@ import tkinter as tk
 from datetime import datetime, timedelta
 from tkinter import END, messagebox, simpledialog, ttk
 
+import matplotlib
 import pandas as pd
+
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
 
 from flight_tracker.airport_from_distance import AirportFromDistance
 from flight_tracker.country_to_airport import CountryToAirport
@@ -28,12 +35,9 @@ class FlightBotGUI(tk.Tk):
     """Tkinter GUI that gathers parameters and runs FlightBot tasks."""
 
     def __init__(self):
-        """Initialize window, frames, widgets, and load saved config."""
         super().__init__()
         self.title("Flight Price Monitor")
-        # allow maximize/resize
         self.resizable(True, True)
-        # make grid cells expand
         self.columnconfigure(0, weight=1)
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
@@ -90,17 +94,42 @@ class FlightBotGUI(tk.Tk):
         )
         self.start_btn.grid(row=len(fields), column=0, columnspan=2, pady=10)
 
-        # Frame #2: best-flight display
-        self.result_frame = tk.LabelFrame(self, text="Best Flight Found")
+        # Frame #2: results (best flight + history)
+        self.result_frame = tk.LabelFrame(self, text="Results")
         self.result_frame.grid(
             row=0, column=1, padx=10, pady=10, sticky="nsew"
         )
-        self.result_frame.rowconfigure(0, weight=1)
+        self.result_frame.rowconfigure(0, weight=0)
+        self.result_frame.rowconfigure(1, weight=1)
         self.result_frame.columnconfigure(0, weight=1)
-        self.best_text = tk.Text(
-            self.result_frame, state="disabled", wrap="word"
+
+        # Historic best-flight display
+        self.historic_frame = tk.LabelFrame(
+            self.result_frame, text="Historic Best Flight"
         )
-        self.best_text.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        self.historic_frame.grid(
+            row=0, column=0, sticky="ew", padx=5, pady=(5, 2)
+        )
+        self.historic_text = tk.Text(
+            self.historic_frame, state="disabled", height=5, wrap="word"
+        )
+        self.historic_text.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Price history graph
+        self.graph_frame = tk.LabelFrame(
+            self.result_frame, text="Price History"
+        )
+        self.graph_frame.grid(
+            row=1, column=0, sticky="nsew", padx=5, pady=(2, 5)
+        )
+        self.graph_frame.rowconfigure(0, weight=1)
+        self.graph_frame.columnconfigure(0, weight=1)
+        self.figure = Figure(figsize=(5, 4), dpi=100)
+        self.ax = self.figure.add_subplot(111)
+        self.ax.set_xlabel("Monitoring Date")
+        self.ax.set_ylabel("Price (€)")
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self.graph_frame)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
         # Frame #3: status panel
         self.status_panel = tk.LabelFrame(self, text="Status")
@@ -108,14 +137,16 @@ class FlightBotGUI(tk.Tk):
             row=1, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew"
         )
         self.status_panel.columnconfigure(0, weight=1)
+        self.status_label = tk.Label(self.status_panel, text="Status: idle")
+        self.status_label.grid(
+            row=0, column=0, padx=5, pady=(5, 0), sticky="w"
+        )
         self.progress = ttk.Progressbar(
             self.status_panel, mode="indeterminate"
         )
-        self.progress.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
-        self.status_label = tk.Label(self.status_panel, text="Status: idle")
-        self.status_label.grid(row=0, column=1, sticky="w", padx=5, pady=5)
+        self.progress.grid(row=1, column=0, padx=5, pady=(0, 5), sticky="ew")
 
-        # load airport-code → name map
+        # load airport-code → name
         airports_df = pd.read_csv(AirportFromDistance.AIRPORTS_URL)
         self.code_to_name = {
             code: name
@@ -125,7 +156,7 @@ class FlightBotGUI(tk.Tk):
             if pd.notna(code)
         }
 
-        # state and managers
+        # state & managers
         self.resolved_airports = {}
         self.config_mgr = ConfigManager()
         self.record_mgr = FlightRecord()
@@ -133,7 +164,7 @@ class FlightBotGUI(tk.Tk):
         self._monitor_thread = None
         self._current_best = None
 
-        # bind focus-out for airport fields
+        # bind focus-out for airports
         for field in ("departure", "destination"):
             self.entries[field].bind(
                 "<FocusOut>",
@@ -154,23 +185,18 @@ class FlightBotGUI(tk.Tk):
             if ck in saved:
                 self.resolved_airports[side] = saved[ck]
 
+        # initial historic display & graph
+        self._load_historic_best()
+        self._plot_history()
+        if self._fields_complete():
+            self._on_start()
+
     def _get_widget_value(self, widget):
-        """Return trimmed text from Entry or Text."""
         if isinstance(widget, tk.Text):
             return widget.get("1.0", END).strip()
         return widget.get().strip()
 
-    def _set_widget_value(self, widget, text):
-        """Replace content of Entry or Text."""
-        if isinstance(widget, tk.Text):
-            widget.delete("1.0", END)
-            widget.insert("1.0", text)
-        else:
-            widget.delete(0, END)
-            widget.insert(0, text)
-
     def _pre_resolve_airports(self, field):
-        """Resolve and display CODE – Name on focus-out."""
         w = self.entries[field]
         raw = self._get_widget_value(w)
         if not raw:
@@ -186,7 +212,12 @@ class FlightBotGUI(tk.Tk):
             messagebox.showerror("Invalid input", f"{field.title()}: {e}")
             return
         disp = [f"{c} - {self.code_to_name.get(c,'')}" for c in codes]
-        self._set_widget_value(w, ",".join(disp))
+        if isinstance(w, tk.Text):
+            w.delete("1.0", END)
+            w.insert("1.0", ",".join(disp))
+        else:
+            w.delete(0, END)
+            w.insert(0, ",".join(disp))
         self.resolved_airports[field] = codes
         cfg = self.config_mgr.load()
         cfg[field] = ",".join(disp)
@@ -194,7 +225,6 @@ class FlightBotGUI(tk.Tk):
         self.config_mgr.save(cfg)
 
     def _resolve_airports(self, s):
-        """Convert input into a list of IATA codes."""
         toks = [t.strip() for t in s.split(",") if t.strip()]
         if all(len(t) == 3 and t.isalpha() and t.isupper() for t in toks):
             return toks
@@ -216,7 +246,6 @@ class FlightBotGUI(tk.Tk):
         return [c for c, _ in CountryToAirport().get_airports(s)]
 
     def _fields_complete(self):
-        """Return True if all required fields have values."""
         dep = self._get_widget_value(self.entries["departure"])
         dest = self._get_widget_value(self.entries["destination"])
         depd = self._get_widget_value(self.entries["dep_date"])
@@ -231,7 +260,6 @@ class FlightBotGUI(tk.Tk):
         return True
 
     def _on_start(self):
-        """Handle Start button: begin monitoring if fields valid."""
         if not self._fields_complete():
             messagebox.showerror(
                 "Missing fields", "Please complete all required fields."
@@ -240,15 +268,13 @@ class FlightBotGUI(tk.Tk):
         if self._monitor_thread and self._monitor_thread.is_alive():
             return
         self._stop_event.clear()
+        self.status_label.config(text="Status: starting...")
         self.progress.start()
         self._current_best = None
-        self.best_text.configure(state="normal")
-        self.best_text.delete("1.0", END)
-        self.best_text.configure(state="disabled")
+        self.best_text = None  # not used here
         self._start_monitoring()
 
     def _start_monitoring(self):
-        """Prepare parameters and spawn the monitoring thread."""
         deps = self.resolved_airports.get("departure", [])
         dests = self.resolved_airports.get("destination", [])
         dep_dates = self._parse_dates(
@@ -296,8 +322,9 @@ class FlightBotGUI(tk.Tk):
         self._monitor_thread.start()
 
     def _monitor_loop(self, deps, dests, date_pairs, params):
-        """Run FlightBot for each route/date pair, save records, update UI."""
         while not self._stop_event.is_set():
+            self.status_label.config(text="Status: checking flights...")
+            self.progress.start()
             for dep, dest in itertools.product(deps, dests):
                 for dd, rd in date_pairs:
                     if self._stop_event.is_set():
@@ -315,8 +342,10 @@ class FlightBotGUI(tk.Tk):
                     )
                     rec = bot.start()
                     if rec:
+                        # save using today's date
+                        monitor_date = datetime.now().strftime("%Y-%m-%d")
                         self.record_mgr.save_record(
-                            date=rec["dep_date"],
+                            date=monitor_date,
                             departure=dep,
                             destination=dest,
                             company=rec["company"],
@@ -324,27 +353,13 @@ class FlightBotGUI(tk.Tk):
                             duration_return=rec["duration_return"],
                             price=rec["price"],
                         )
-                        if (self._current_best is None) or (
-                            rec["price"] < self._current_best["price"]
-                        ):
-                            self._current_best = rec
-                            self.best_text.configure(state="normal")
-                            self.best_text.delete("1.0", END)
-                            self.best_text.insert(
-                                END,
-                                f"Date: {rec['dep_date']}\n"
-                                f"Route: {dep} → {dest}\n"
-                                f"Company: {rec['company']}\n"
-                                f"Price: €{rec['price']:.2f}\n"
-                                f"Outbound: {rec['duration_out']}\n"
-                                f"Return: {rec['duration_return']}\n",
-                            )
-                            self.best_text.configure(state="disabled")
+                        self._update_historic_best()
+                        self._plot_history()
                 if self._stop_event.is_set():
                     break
-            if self._stop_event.is_set():
-                break
-            # sleep 4 hours in 1-min steps
+            self.progress.stop()
+            self.status_label.config(text="Status: waiting")
+            # sleep up to 4 hours
             for _ in range(4 * 60):
                 if self._stop_event.is_set():
                     break
@@ -352,11 +367,69 @@ class FlightBotGUI(tk.Tk):
 
         self.progress.stop()
         self.status_label.config(text="Status: idle")
-        if not self._stop_event.is_set():
-            messagebox.showinfo("FlightBot", "Monitoring loop ended.")
+        messagebox.showinfo("FlightBot", "Monitoring loop ended.")
+
+    def _load_historic_best(self):
+        """Load the overall best record and display it."""
+        path = self.record_mgr.path
+        if not os.path.exists(path):
+            return
+        best_rec = None
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if best_rec is None or rec["price"] < best_rec["price"]:
+                    best_rec = rec
+        if not best_rec:
+            return
+        text = (
+            f"Date: {best_rec['date']}\n"
+            f"Route: {best_rec['departure']} → {best_rec['destination']}\n"
+            f"Company: {best_rec['company']}\n"
+            f"Price: €{best_rec['price']:.2f}\n"
+            f"Outbound: {best_rec['duration_out']}\n"
+            f"Return: {best_rec['duration_return']}\n"
+        )
+        self.historic_text.configure(state="normal")
+        self.historic_text.delete("1.0", END)
+        self.historic_text.insert(END, text)
+        self.historic_text.configure(state="disabled")
+
+    def _update_historic_best(self):
+        """Reload and display best-flight after saving a new record."""
+        self._load_historic_best()
+
+    def _plot_history(self):
+        """Load all records and plot price vs monitoring date with margins."""
+        path = self.record_mgr.path
+        if not os.path.exists(path):
+            return
+        dates, prices = [], []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                d = datetime.strptime(rec["date"], "%Y-%m-%d")
+                dates.append(d)
+                prices.append(rec["price"])
+        if not dates:
+            return
+        self.ax.clear()
+        self.ax.plot_date(dates, prices, "-o")
+        # scale axis from day before min to day after max
+        min_d, max_d = min(dates), max(dates)
+        self.ax.set_xlim(min_d - timedelta(days=1), max_d + timedelta(days=1))
+        self.ax.set_xlabel("Monitoring Date")
+        self.ax.set_ylabel("Price (€)")
+        self.figure.autofmt_xdate()
+        self.canvas.draw()
 
     def _parse_dates(self, s):
-        """Parse single or range date into list of datetime."""
         parts = s.strip().split("-")
         if len(parts) == 3:
             return [datetime.strptime(s, "%Y-%m-%d")]
@@ -371,7 +444,6 @@ class FlightBotGUI(tk.Tk):
         raise ValueError("Invalid date format")
 
     def _parse_durations(self, s):
-        """Parse single or range duration into list of ints."""
         parts = s.strip().split("-")
         if len(parts) == 1:
             return [int(parts[0])]
