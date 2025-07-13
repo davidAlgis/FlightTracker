@@ -8,17 +8,20 @@ GUI for the Flight Price Monitor. Supports:
   (YYYY-MM-DD or YYYY-MM-DD-YYYY-MM-DD)
 - Trip-duration domains (days, e.g. 3 or 3-7)
 - Max one-way/return flight duration (hours)
-- Confirmation of total number of monitoring tasks before starting
+- Automatic start/stop when fields are filled/cleared
 - Load and save of last search config to config.json
 - Quiet, in-place resolution of airports to "CODE - Name" on field leave
 - Multi-line text boxes for departure and destination fields
 - Runs FlightBot tasks in a background thread
 - Shows an indeterminate progress bar while tracking
+- Repeats full monitoring every 4 hours until fields change
+- Status label indicating current flight being checked
 """
 
 import itertools
 import re
 import threading
+import time
 import tkinter as tk
 from datetime import datetime, timedelta
 from tkinter import END, messagebox, simpledialog, ttk
@@ -32,10 +35,9 @@ from flight_tracker.load_config import ConfigManager
 
 
 class FlightBotGUI(tk.Tk):
-    """Tkinter GUI that gathers parameters and starts FlightBot tasks."""
+    """Tkinter GUI that gathers parameters and auto-starts FlightBot tasks."""
 
     def __init__(self):
-        """Initialize window, fields, bindings, and load saved config."""
         super().__init__()
         self.title("Flight Price Monitor")
         self.geometry("900x600")
@@ -78,6 +80,7 @@ class FlightBotGUI(tk.Tk):
             )
             widget.grid(row=idx, column=1, padx=8, pady=4, sticky="w")
             self.entries[name] = widget
+            widget.bind("<KeyRelease>", lambda ev: self._on_fields_changed())
 
         airports_df = pd.read_csv(AirportFromDistance.AIRPORTS_URL)
         self.code_to_name = {
@@ -94,14 +97,14 @@ class FlightBotGUI(tk.Tk):
                 "<FocusOut>", lambda ev, f=field: self._pre_resolve_airports(f)
             )
 
-        self.start_btn = tk.Button(
-            self, text="Start Monitoring", command=self.start_monitor
-        )
-        self.start_btn.grid(row=len(fields), column=0, columnspan=2, pady=10)
-
         self.progress = ttk.Progressbar(self, mode="indeterminate")
         self.progress.grid(
-            row=len(fields) + 1, column=0, columnspan=2, pady=4, sticky="ew"
+            row=len(fields), column=0, columnspan=2, pady=10, sticky="ew"
+        )
+
+        self.status_label = tk.Label(self, text="Status: idle")
+        self.status_label.grid(
+            row=len(fields) + 1, column=0, columnspan=2, pady=4, sticky="w"
         )
 
         self.config_mgr = ConfigManager()
@@ -118,14 +121,18 @@ class FlightBotGUI(tk.Tk):
             if codes_key in saved:
                 self.resolved_airports[side] = saved[codes_key]
 
+        self._stop_event = threading.Event()
+        self._monitor_thread = None
+
+        # initial trigger
+        self.after(100, self._on_fields_changed)
+
     def _get_widget_value(self, widget):
-        """Return trimmed string from Entry or Text widget."""
         if isinstance(widget, tk.Text):
             return widget.get("1.0", END).strip()
         return widget.get().strip()
 
     def _set_widget_value(self, widget, text):
-        """Replace content of Entry or Text widget."""
         if isinstance(widget, tk.Text):
             widget.delete("1.0", END)
             widget.insert("1.0", text)
@@ -134,7 +141,6 @@ class FlightBotGUI(tk.Tk):
             widget.insert(0, text)
 
     def _pre_resolve_airports(self, field):
-        """Resolve airports to 'CODE - Name' on field leave."""
         widget = self.entries[field]
         raw = self._get_widget_value(widget)
         if not raw:
@@ -156,9 +162,9 @@ class FlightBotGUI(tk.Tk):
         cfg[field] = ",".join(display)
         cfg[f"{field}_codes"] = codes
         self.config_mgr.save(cfg)
+        self._on_fields_changed()
 
     def _resolve_airports(self, input_str):
-        """Convert input to IATA codes list."""
         tokens = [t.strip() for t in input_str.split(",") if t.strip()]
         if all(len(t) == 3 and t.isalpha() and t.isupper() for t in tokens):
             return tokens
@@ -180,7 +186,6 @@ class FlightBotGUI(tk.Tk):
         return [c for c, _ in CountryToAirport().get_airports(input_str)]
 
     def _parse_date_list(self, date_str):
-        """Parse date or date range into datetimes."""
         parts = date_str.strip().split("-")
         if len(parts) == 3:
             return [datetime.strptime(date_str, "%Y-%m-%d")]
@@ -195,7 +200,6 @@ class FlightBotGUI(tk.Tk):
         raise ValueError("Invalid date format")
 
     def _parse_duration_list(self, dur_str):
-        """Parse trip-duration domain into list of ints."""
         parts = dur_str.strip().split("-")
         if len(parts) == 1:
             return [int(parts[0])]
@@ -206,91 +210,116 @@ class FlightBotGUI(tk.Tk):
             return list(range(lo, hi + 1))
         raise ValueError("Invalid duration format")
 
-    def start_monitor(self):
-        """
-        Gather inputs, confirm count, save config, then run FlightBots
-        in background thread with a progress bar.
-        """
-        try:
-            for side in ("departure", "destination"):
-                if side not in self.resolved_airports:
-                    self._pre_resolve_airports(side)
-            deps = self.resolved_airports["departure"]
-            dests = self.resolved_airports["destination"]
-            dep_dates = self._parse_date_list(
-                self._get_widget_value(self.entries["dep_date"])
-            )
-            trip = self._get_widget_value(self.entries["trip_duration"])
-            if trip:
-                durations = self._parse_duration_list(trip)
-                date_pairs = [
-                    (
-                        d.strftime("%Y-%m-%d"),
-                        (d + timedelta(days=dur)).strftime("%Y-%m-%d"),
-                    )
-                    for d in dep_dates
-                    for dur in durations
-                ]
-            else:
-                ret_dates = self._parse_date_list(
-                    self._get_widget_value(self.entries["arrival_date"])
+    def _fields_complete(self):
+        dep = self._get_widget_value(self.entries["departure"])
+        dest = self._get_widget_value(self.entries["destination"])
+        depd = self._get_widget_value(self.entries["dep_date"])
+        trip = self._get_widget_value(self.entries["trip_duration"])
+        arrd = self._get_widget_value(self.entries["arrival_date"])
+        mdur = self._get_widget_value(self.entries["max_duration_flight"])
+        plim = self._get_widget_value(self.entries["price_limit"])
+        if not dep or not dest or not depd or not mdur or not plim:
+            return False
+        if not trip and not arrd:
+            return False
+        return True
+
+    def _on_fields_changed(self):
+        if self._fields_complete():
+            if not self._monitor_thread or not self._monitor_thread.is_alive():
+                self._stop_event.clear()
+                self.progress.start()
+                self._start_monitoring_loop()
+        else:
+            if self._monitor_thread and self._monitor_thread.is_alive():
+                self._stop_event.set()
+                self.progress.stop()
+                messagebox.showinfo(
+                    "FlightBot", "Monitoring stopped (fields changed)."
                 )
-                date_pairs = [
-                    (d.strftime("%Y-%m-%d"), r.strftime("%Y-%m-%d"))
-                    for d, r in itertools.product(dep_dates, ret_dates)
-                ]
 
-            params = {
-                "max_duration_flight": float(
-                    self._get_widget_value(self.entries["max_duration_flight"])
-                ),
-                "price_limit": int(
-                    self._get_widget_value(self.entries["price_limit"])
-                ),
-            }
-        except ValueError as e:
-            messagebox.showerror("Invalid input", str(e))
-            return
-
-        total = len(deps) * len(dests) * len(date_pairs)
-        if not messagebox.askyesno(
-            "Confirm Tasks", f"{total} tasks will be started. Continue?"
-        ):
-            return
-
+    def _start_monitoring_loop(self):
+        deps = self.resolved_airports.get("departure", [])
+        dests = self.resolved_airports.get("destination", [])
+        dep_dates = self._parse_date_list(
+            self._get_widget_value(self.entries["dep_date"])
+        )
+        trip = self._get_widget_value(self.entries["trip_duration"])
+        if trip:
+            durations = self._parse_duration_list(trip)
+            date_pairs = [
+                (
+                    d.strftime("%Y-%m-%d"),
+                    (d + timedelta(days=dur)).strftime("%Y-%m-%d"),
+                )
+                for d in dep_dates
+                for dur in durations
+            ]
+        else:
+            ret_dates = self._parse_date_list(
+                self._get_widget_value(self.entries["arrival_date"])
+            )
+            date_pairs = [
+                (d.strftime("%Y-%m-%d"), r.strftime("%Y-%m-%d"))
+                for d, r in itertools.product(dep_dates, ret_dates)
+            ]
+        params = {
+            "max_duration_flight": float(
+                self._get_widget_value(self.entries["max_duration_flight"])
+            ),
+            "price_limit": int(
+                self._get_widget_value(self.entries["price_limit"])
+            ),
+        }
         cfg = {k: self._get_widget_value(w) for k, w in self.entries.items()}
         cfg["departure_codes"] = deps
         cfg["destination_codes"] = dests
         cfg["max_duration_flight"] = params["max_duration_flight"]
         self.config_mgr.save(cfg)
 
-        self.start_btn.config(state="disabled")
-        self.progress.start()
-
-        thread = threading.Thread(
-            target=self._run_bots,
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_loop,
             args=(deps, dests, date_pairs, params),
             daemon=True,
         )
-        thread.start()
+        self._monitor_thread.start()
 
-    def _run_bots(self, deps, dests, date_pairs, params):
-        """Run FlightBot.start() for each route/date pair in background."""
-        for dep, dest in itertools.product(deps, dests):
-            for dd, rd in date_pairs:
-                FlightBot(
-                    departure=dep,
-                    destination=dest,
-                    dep_date=dd,
-                    arrival_date=rd,
-                    price_limit=params["price_limit"],
-                    max_duration_flight=params["max_duration_flight"],
-                ).start()
+    def _monitor_loop(self, deps, dests, date_pairs, params):
+        while not self._stop_event.is_set():
+            for dep, dest in itertools.product(deps, dests):
+                for dd, rd in date_pairs:
+                    if self._stop_event.is_set():
+                        break
+                    # update status
+                    self.status_label.after(
+                        0,
+                        lambda d=dep, D=dest, od=dd, rr=rd: self.status_label.config(
+                            text=f"Checking {d}→{D} on {od} → {rr}"
+                        ),
+                    )
+                    FlightBot(
+                        departure=dep,
+                        destination=dest,
+                        dep_date=dd,
+                        arrival_date=rd,
+                        price_limit=params["price_limit"],
+                        max_duration_flight=params["max_duration_flight"],
+                    ).start()
+                if self._stop_event.is_set():
+                    break
+            if self._stop_event.is_set():
+                break
+            # wait 4 hours or until stopped
+            for _ in range(4 * 60):
+                if self._stop_event.is_set():
+                    break
+                time.sleep(60)
         self.progress.stop()
-        messagebox.showinfo(
-            "FlightBot", "All monitoring tasks have completed."
+        self.status_label.after(
+            0, lambda: self.status_label.config(text="Status: idle")
         )
-        self.quit()
+        if not self._stop_event.is_set():
+            messagebox.showinfo("FlightBot", "Monitoring loop ended.")
 
 
 if __name__ == "__main__":
