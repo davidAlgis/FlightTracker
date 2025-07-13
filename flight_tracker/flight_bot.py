@@ -11,7 +11,8 @@ from win10toast import ToastNotifier
 
 class FlightBot:
     """
-    A simple flight-price checker that scrapes Kayak once.
+    A simple flight-price checker that scrapes Kayak once,
+    filters by max one-way/round-trip duration, and prints/notifies.
     """
 
     def __init__(
@@ -23,6 +24,7 @@ class FlightBot:
         price_limit: int,
         checking_interval: int,
         checking_duration: int,
+        max_duration_flight: float,
         driver_path: str = None,
     ):
         self.departure = departure
@@ -32,19 +34,33 @@ class FlightBot:
         self.price_limit = price_limit
         self.checking_interval = checking_interval
         self.checking_duration = checking_duration
+        self.max_duration_flight = max_duration_flight
         self.url = (
             f"https://www.kayak.fr/flights/"
-            f"{self.departure}-{self.destination}/"
-            f"{self.dep_date}/{self.arrival_date}?sort=bestflight_a"
+            f"{departure}-{destination}/"
+            f"{dep_date}/{arrival_date}?sort=bestflight_a"
         )
         self.driver_path = driver_path
         self.notifier = ToastNotifier()
 
+    def _parse_duration_hours(self, text: str) -> float:
+        """
+        Convert a string like '18h 55min' into hours as float.
+        """
+        parts = text.split("h")
+        hours = int(parts[0])
+        mins = (
+            int(parts[1].replace("min", "").strip())
+            if "min" in parts[1]
+            else 0
+        )
+        return hours + mins / 60.0
+
     def _get_current_price(self) -> float:
         """
-        Launch Chrome, reject cookie popup if present, scrape each
-        round-trip result’s price and its outbound/return durations,
-        print them, and return the lowest price in EUR.
+        Scrape each round-trip result’s price and durations,
+        filter out any whose outbound or return exceeds max_duration_flight,
+        print each matching flight, and return the lowest price.
         """
         options = webdriver.ChromeOptions()
         options.add_experimental_option("excludeSwitches", ["enable-logging"])
@@ -73,9 +89,9 @@ class FlightBot:
         soup = BeautifulSoup(html, "html.parser")
         results = soup.find_all("div", class_="Fxw9-result-item-container")
 
-        all_prices = []
+        valid_prices = []
         for result in results:
-            # price
+            # price in EUR
             price_div = result.find("div", class_="e2GB-price-text")
             txt = price_div.get_text().strip() if price_div else ""
             digits = "".join(filter(str.isdigit, txt))
@@ -83,27 +99,40 @@ class FlightBot:
                 continue
             price_eur = int(digits)
 
-            # durations: outbound then return
+            # extract durations
             leg_divs = result.find_all(
                 "div", class_="xdW8 xdW8-mod-full-airport"
             )
-            durations = []
+            dur_texts = []
             for leg in leg_divs:
-                dur_div = leg.find(
-                    "div", class_="vmXl vmXl-mod-variant-default"
-                )
-                if dur_div:
-                    durations.append(dur_div.get_text().strip())
-            outward = durations[0] if len(durations) > 0 else "N/A"
-            ret = durations[1] if len(durations) > 1 else "N/A"
+                dv = leg.find("div", class_="vmXl vmXl-mod-variant-default")
+                if dv:
+                    dur_texts.append(dv.get_text().strip())
+            outward = dur_texts[0] if len(dur_texts) > 0 else ""
+            ret = dur_texts[1] if len(dur_texts) > 1 else ""
 
+            # filter by max_duration_flight
+            ok = True
+            if outward:
+                if (
+                    self._parse_duration_hours(outward)
+                    > self.max_duration_flight
+                ):
+                    ok = False
+            if ret and ok:
+                if self._parse_duration_hours(ret) > self.max_duration_flight:
+                    ok = False
+            if not ok:
+                continue
+
+            # print this flight
             print(
                 f"  Flight: €{price_eur}, "
                 f"Outbound: {outward}, Return: {ret}"
             )
-            all_prices.append(price_eur)
+            valid_prices.append(price_eur)
 
-        return min(all_prices) if all_prices else None  # type: ignore
+        return min(valid_prices) if valid_prices else None  # type: ignore
 
     def _show_notification(self, price: float):
         """
@@ -118,15 +147,14 @@ class FlightBot:
 
     def start(self):
         """
-        Check flight price once, print it in EUR, and notify if below limit.
+        Check flight price once, print filtered results, and notify if below limit.
         """
         print(
-            f"Checking best price for "
-            f"{self.departure}→{self.destination} on {self.dep_date}…"
+            f"Checking best price for {self.departure}→{self.destination} on {self.dep_date}…"
         )
         price = self._get_current_price()
         if price is None:
-            print("  ❌ Failed to find any prices.")
+            print("  ❌ No valid flights under max duration.")
             return
 
         print(f"  💰 Best price: €{price:.2f}")
