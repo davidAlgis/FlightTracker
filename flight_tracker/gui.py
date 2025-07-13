@@ -22,9 +22,9 @@ from tkinter import END, messagebox, simpledialog, ttk
 import matplotlib
 import pandas as pd
 import pystray
-from PIL import Image, ImageDraw
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from PIL import Image, ImageDraw
 from win10toast import ToastNotifier
 
 from flight_tracker.airport_from_distance import AirportFromDistance
@@ -52,13 +52,13 @@ class FlightBotGUI(tk.Tk):
 
         # state and managers
         self.resolved_airports = {}
-        self.config_mgr       = ConfigManager()
-        self.record_mgr       = FlightRecord()
-        self.notifier         = ToastNotifier()
-        self.best_prices      = {}       # (dep, dest) -> best price this session
-        self._first_pass      = True
-        self._stop_event      = threading.Event()
-        self._monitor_thread  = None
+        self.config_mgr = ConfigManager()
+        self.record_mgr = FlightRecord()
+        self.notifier = ToastNotifier()
+        self.best_prices = {}  # (dep, dest) -> best price this session
+        self._first_pass = True
+        self._stop_event = threading.Event()
+        self._monitor_thread = None
 
         # tray icon
         self._create_tray_icon()
@@ -67,8 +67,7 @@ class FlightBotGUI(tk.Tk):
         # bind focus-out for automatic airport resolution
         for field in ("departure", "destination"):
             self.entries[field].bind(
-                "<FocusOut>",
-                lambda ev, f=field: self._pre_resolve_airports(f)
+                "<FocusOut>", lambda ev, f=field: self._pre_resolve_airports(f)
             )
 
         self._load_saved_config()
@@ -93,12 +92,28 @@ class FlightBotGUI(tk.Tk):
         frame.columnconfigure(1, weight=1)
 
         fields = [
-            ("Departure(s) (IATA, City, Country or Country)", "departure", True),
-            ("Destination(s) (IATA, City, Country or Country)", "destination", True),
-            ("Departure Date(s)\n(YYYY-MM-DD or YYYY-MM-DD-YYYY-MM-DD)", "dep_date", False),
-            ("Return Date(s)\n(YYYY-MM-DD or YYYY-MM-DD-YYYY-MM-DD)",  "arrival_date", False),
-            ("Trip Duration (days)\n(e.g. 3 or 3-7)",                      "trip_duration", False),
-            ("Max Flight Duration (h)",                                   "max_duration_flight", False),
+            (
+                "Departure(s) (IATA, City, Country or Country)",
+                "departure",
+                True,
+            ),
+            (
+                "Destination(s) (IATA, City, Country or Country)",
+                "destination",
+                True,
+            ),
+            (
+                "Departure Date(s)\n(YYYY-MM-DD or YYYY-MM-DD-YYYY-MM-DD)",
+                "dep_date",
+                False,
+            ),
+            (
+                "Return Date(s)\n(YYYY-MM-DD or YYYY-MM-DD-YYYY-MM-DD)",
+                "arrival_date",
+                False,
+            ),
+            ("Trip Duration (days)\n(e.g. 3 or 3-7)", "trip_duration", False),
+            ("Max Flight Duration (h)", "max_duration_flight", False),
         ]
 
         self.entries = {}
@@ -108,7 +123,8 @@ class FlightBotGUI(tk.Tk):
             )
             widget = (
                 tk.Text(frame, width=40, height=3)
-                if multiline else tk.Entry(frame, width=30)
+                if multiline
+                else tk.Entry(frame, width=30)
             )
             widget.grid(row=idx, column=1, padx=5, pady=5, sticky="ew")
             widget.bind("<KeyRelease>", lambda ev: self._on_fields_changed())
@@ -128,16 +144,18 @@ class FlightBotGUI(tk.Tk):
         frame.columnconfigure(0, weight=1)
 
         hf = tk.LabelFrame(frame, text="Historic Best Flight")
-        hf.grid(row=0, column=0, sticky="ew", padx=5, pady=(5,2))
-        self.historic_text = tk.Text(hf, state="disabled", height=5, wrap="word")
+        hf.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 2))
+        self.historic_text = tk.Text(
+            hf, state="disabled", height=5, wrap="word"
+        )
         self.historic_text.pack(fill="both", expand=True, padx=5, pady=5)
 
         gf = tk.LabelFrame(frame, text="Price History")
-        gf.grid(row=1, column=0, sticky="nsew", padx=5, pady=(2,5))
+        gf.grid(row=1, column=0, sticky="nsew", padx=5, pady=(2, 5))
         gf.rowconfigure(0, weight=1)
         gf.columnconfigure(0, weight=1)
 
-        self.figure = Figure(figsize=(5,4), dpi=100)
+        self.figure = Figure(figsize=(5, 4), dpi=100)
         self.ax = self.figure.add_subplot(111)
         self.ax.set_xlabel("Monitoring Date")
         self.ax.set_ylabel("Price (€)")
@@ -150,15 +168,18 @@ class FlightBotGUI(tk.Tk):
     def _create_status_panel(self):
         """Bottom panel with current status label and indeterminate progress bar."""
         sp = tk.LabelFrame(self, text="Status")
-        sp.grid(row=1, column=0, columnspan=2,
-                padx=10, pady=(0,10), sticky="ew")
+        sp.grid(
+            row=1, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew"
+        )
         sp.columnconfigure(0, weight=1)
 
         self.status_label = tk.Label(sp, text="Status: idle")
-        self.status_label.grid(row=0, column=0, padx=5, pady=(5,0), sticky="w")
+        self.status_label.grid(
+            row=0, column=0, padx=5, pady=(5, 0), sticky="w"
+        )
 
         self.progress = ttk.Progressbar(sp, mode="indeterminate")
-        self.progress.grid(row=1, column=0, padx=5, pady=(0,5), sticky="ew")
+        self.progress.grid(row=1, column=0, padx=5, pady=(0, 5), sticky="ew")
 
         self.status_panel = sp
 
@@ -166,7 +187,7 @@ class FlightBotGUI(tk.Tk):
         """Load IATA→airport-name map from OurAirports CSV."""
         df = pd.read_csv(AirportFromDistance.AIRPORTS_URL)
         self.code_to_name = {
-            c: n for c,n in zip(df["iata_code"], df["name"]) if pd.notna(c)
+            c: n for c, n in zip(df["iata_code"], df["name"]) if pd.notna(c)
         }
 
     def _load_saved_config(self):
@@ -179,7 +200,7 @@ class FlightBotGUI(tk.Tk):
                     widget.insert("1.0", val)
                 else:
                     widget.insert(0, val)
-        for side in ("departure","destination"):
+        for side in ("departure", "destination"):
             ck = f"{side}_codes"
             if ck in saved:
                 self.resolved_airports[side] = saved[ck]
@@ -192,11 +213,11 @@ class FlightBotGUI(tk.Tk):
 
     def _fields_complete(self):
         """Return True if all required fields have values."""
-        dep  = self._get_widget_value(self.entries["departure"])
+        dep = self._get_widget_value(self.entries["departure"])
         dest = self._get_widget_value(self.entries["destination"])
-        dd   = self._get_widget_value(self.entries["dep_date"])
+        dd = self._get_widget_value(self.entries["dep_date"])
         trip = self._get_widget_value(self.entries["trip_duration"])
-        arr  = self._get_widget_value(self.entries["arrival_date"])
+        arr = self._get_widget_value(self.entries["arrival_date"])
         mdur = self._get_widget_value(self.entries["max_duration_flight"])
         if not (dep and dest and dd and mdur):
             return False
@@ -213,16 +234,18 @@ class FlightBotGUI(tk.Tk):
             self._stop_event.set()
             self.progress.stop()
             self.status_label.config(text="Status: idle")
-            messagebox.showinfo("FlightBot", "Monitoring stopped (fields changed).")
+            messagebox.showinfo(
+                "FlightBot", "Monitoring stopped (fields changed)."
+            )
 
     def _pre_resolve_airports(self, field):
         """Resolve freeform airport input into IATA codes and display CODE – Name."""
-        w   = self.entries[field]
+        w = self.entries[field]
         raw = self._get_widget_value(w)
         if not raw:
             return
         if re.match(r"^[A-Z]{3} - .+", raw):
-            codes = [seg.split("-",1)[0].strip() for seg in raw.split(",")]
+            codes = [seg.split("-", 1)[0].strip() for seg in raw.split(",")]
             self.resolved_airports[field] = codes
             return
         try:
@@ -246,21 +269,24 @@ class FlightBotGUI(tk.Tk):
     def _resolve_airports(self, txt):
         """Convert comma-list or City/Country or Country to IATA codes."""
         toks = [t.strip() for t in txt.split(",") if t.strip()]
-        if all(len(t)==3 and t.isalpha() and t.isupper() for t in toks):
+        if all(len(t) == 3 and t.isalpha() and t.isupper() for t in toks):
             return toks
-        if len(toks)==2:
+        if len(toks) == 2:
             city, country = toks
             dur = simpledialog.askinteger(
                 "Max Duration",
                 f"Max transport duration (min) from {city}, {country}",
-                minvalue=1
+                minvalue=1,
             )
             if dur is None:
                 raise ValueError("Cancelled")
-            return [c for c,_ in AirportFromDistance().get_airports(
-                f"{city}, {country}", dur
-            )]
-        return [c for c,_ in CountryToAirport().get_airports(txt)]
+            return [
+                c
+                for c, _ in AirportFromDistance().get_airports(
+                    f"{city}, {country}", dur
+                )
+            ]
+        return [c for c, _ in CountryToAirport().get_airports(txt)]
 
     def _on_start(self):
         """Start the background monitoring thread if not already running."""
@@ -278,38 +304,48 @@ class FlightBotGUI(tk.Tk):
 
     def _start_monitoring(self):
         """Gather parameters, save config, and launch the monitor loop."""
-        deps   = self.resolved_airports.get("departure", [])
-        dests  = self.resolved_airports.get("destination", [])
-        dep_ds = self._parse_dates(self._get_widget_value(self.entries["dep_date"]))
-        trip   = self._get_widget_value(self.entries["trip_duration"])
+        deps = self.resolved_airports.get("departure", [])
+        dests = self.resolved_airports.get("destination", [])
+        dep_ds = self._parse_dates(
+            self._get_widget_value(self.entries["dep_date"])
+        )
+        trip = self._get_widget_value(self.entries["trip_duration"])
         if trip:
-            drs   = self._parse_durations(trip)
+            drs = self._parse_durations(trip)
             pairs = [
-                (d.strftime("%Y-%m-%d"),
-                 (d+timedelta(days=x)).strftime("%Y-%m-%d"))
-                for d in dep_ds for x in drs
+                (
+                    d.strftime("%Y-%m-%d"),
+                    (d + timedelta(days=x)).strftime("%Y-%m-%d"),
+                )
+                for d in dep_ds
+                for x in drs
             ]
         else:
-            arr_ds = self._parse_dates(self._get_widget_value(self.entries["arrival_date"]))
-            pairs  = [
+            arr_ds = self._parse_dates(
+                self._get_widget_value(self.entries["arrival_date"])
+            )
+            pairs = [
                 (d.strftime("%Y-%m-%d"), r.strftime("%Y-%m-%d"))
-                for d in dep_ds for r in arr_ds
+                for d in dep_ds
+                for r in arr_ds
             ]
 
         params = {
-            "max_duration_flight": float(self._get_widget_value(self.entries["max_duration_flight"]))
+            "max_duration_flight": float(
+                self._get_widget_value(self.entries["max_duration_flight"])
+            )
         }
 
-        cfg = {k:self._get_widget_value(w) for k,w in self.entries.items()}
-        cfg["departure_codes"]     = deps
-        cfg["destination_codes"]   = dests
+        cfg = {k: self._get_widget_value(w) for k, w in self.entries.items()}
+        cfg["departure_codes"] = deps
+        cfg["destination_codes"] = dests
         cfg["max_duration_flight"] = params["max_duration_flight"]
         self.config_mgr.save(cfg)
 
         self._monitor_thread = threading.Thread(
             target=self._monitor_loop,
             args=(deps, dests, pairs, params),
-            daemon=True
+            daemon=True,
         )
         self._monitor_thread.start()
 
@@ -343,13 +379,15 @@ class FlightBotGUI(tk.Tk):
                 for dd, rd in pairs:
                     if self._stop_event.is_set():
                         break
-                    self.status_label.config(text=f"Checking {dep}→{dest} on {dd} → {rd}")
+                    self.status_label.config(
+                        text=f"Checking {dep}→{dest} on {dd} → {rd}"
+                    )
                     bot = FlightBot(
                         departure=dep,
                         destination=dest,
                         dep_date=dd,
                         arrival_date=rd,
-                        max_duration_flight=params["max_duration_flight"]
+                        max_duration_flight=params["max_duration_flight"],
                     )
                     rec = bot.start()
                     if not rec:
@@ -359,10 +397,12 @@ class FlightBotGUI(tk.Tk):
                     if best_for_pair is None or price < best_for_pair:
                         best_for_pair = price
 
-                    today        = datetime.now().strftime("%Y-%m-%d")
-                    global_prev  = self._get_global_best_price()
-                    three_days   = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
-                    old_rec      = self.record_mgr.load_record(three_days)
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    global_prev = self._get_global_best_price()
+                    three_days = (datetime.now() - timedelta(days=3)).strftime(
+                        "%Y-%m-%d"
+                    )
+                    old_rec = self.record_mgr.load_record(three_days)
 
                     self.record_mgr.save_record(
                         date=today,
@@ -371,7 +411,7 @@ class FlightBotGUI(tk.Tk):
                         company=rec["company"],
                         duration_out=rec["duration_out"],
                         duration_return=rec["duration_return"],
-                        price=price
+                        price=price,
                     )
 
                     # notify on new all-time low
@@ -379,17 +419,19 @@ class FlightBotGUI(tk.Tk):
                         self.notifier.show_toast(
                             "New All-Time Low!",
                             f"{dep}→{dest} on {dd}: €{price:.2f}",
-                            duration=10, threaded=True
+                            duration=10,
+                            threaded=True,
                         )
 
                     # notify on >10% jump vs 3-day old price
                     if old_rec and price > old_rec["price"] * 1.1:
                         diff = price - old_rec["price"]
-                        pct  = diff / old_rec["price"] * 100
+                        pct = diff / old_rec["price"] * 100
                         self.notifier.show_toast(
                             "Price Jump Alert",
                             f"{dep}→{dest} jumped €{diff:.2f} (+{pct:.0f}%) vs 3 days ago",
-                            duration=10, threaded=True
+                            duration=10,
+                            threaded=True,
                         )
 
                     self._load_historic_best()
@@ -419,12 +461,14 @@ class FlightBotGUI(tk.Tk):
         """
         Remove airports whose all pair prices are ≥20% above overall best,
         except those that ever appeared in a daily-best record.
-        Save updated codes back to config.
+        Save updated codes and display text back to config.
         """
         if not self.best_prices:
             return
 
         overall = min(self.best_prices.values())
+
+        # build protected set from historic bests
         protected = set()
         if os.path.exists(self.record_mgr.path):
             with open(self.record_mgr.path, "r", encoding="utf-8") as f:
@@ -436,31 +480,44 @@ class FlightBotGUI(tk.Tk):
                     except json.JSONDecodeError:
                         continue
 
-        deps  = self.resolved_airports.get("departure", [])
+        deps = self.resolved_airports.get("departure", [])
         dests = self.resolved_airports.get("destination", [])
 
         drop_deps = [
-            d for d in deps
-            if d not in protected and all(
-                self.best_prices.get((d,x), float("inf")) >= 1.2*overall
+            d
+            for d in deps
+            if d not in protected
+            and all(
+                self.best_prices.get((d, x), float("inf")) >= 1.2 * overall
                 for x in dests
             )
         ]
         drop_dests = [
-            x for x in dests
-            if x not in protected and all(
-                self.best_prices.get((d,x), float("inf")) <= float("inf") and
-                self.best_prices.get((d,x), float("inf")) >= 1.2*overall
+            x
+            for x in dests
+            if x not in protected
+            and all(
+                self.best_prices.get((d, x), float("inf")) >= 1.2 * overall
                 for d in deps
             )
         ]
 
-        self.resolved_airports["departure"]   = [d for d in deps  if d not in drop_deps]
-        self.resolved_airports["destination"] = [x for x in dests if x not in drop_dests]
+        # prune
+        self.resolved_airports["departure"] = [
+            d for d in deps if d not in drop_deps
+        ]
+        self.resolved_airports["destination"] = [
+            x for x in dests if x not in drop_dests
+        ]
 
-        for field in ("departure","destination"):
+        # update fields and collect display text
+        display = {}
+        for field in ("departure", "destination"):
             codes = self.resolved_airports[field]
-            text = ",".join(f"{c} - {self.code_to_name.get(c,'')}" for c in codes)
+            text = ",".join(
+                f"{c} - {self.code_to_name.get(c,'')}" for c in codes
+            )
+            display[field] = text
             w = self.entries[field]
             if isinstance(w, tk.Text):
                 w.delete("1.0", END)
@@ -469,9 +526,12 @@ class FlightBotGUI(tk.Tk):
                 w.delete(0, END)
                 w.insert(0, text)
 
+        # save everything back to config
         cfg = self.config_mgr.load()
-        cfg["departure_codes"]   = self.resolved_airports["departure"]
+        cfg["departure_codes"] = self.resolved_airports["departure"]
         cfg["destination_codes"] = self.resolved_airports["destination"]
+        cfg["departure"] = display["departure"]
+        cfg["destination"] = display["destination"]
         self.config_mgr.save(cfg)
 
     def _load_historic_best(self):
@@ -541,7 +601,7 @@ class FlightBotGUI(tk.Tk):
             d1 = datetime.strptime(en, "%Y-%m-%d")
             if d1 < d0:
                 raise ValueError("End date before start date")
-            return [d0 + timedelta(days=i) for i in range((d1-d0).days+1)]
+            return [d0 + timedelta(days=i) for i in range((d1 - d0).days + 1)]
         raise ValueError("Invalid date format")
 
     def _parse_durations(self, s):
@@ -553,7 +613,7 @@ class FlightBotGUI(tk.Tk):
             lo, hi = int(parts[0]), int(parts[1])
             if hi < lo:
                 raise ValueError("Invalid duration range")
-            return list(range(lo, hi+1))
+            return list(range(lo, hi + 1))
         raise ValueError("Invalid duration format")
 
     def _on_close(self):
@@ -574,13 +634,13 @@ class FlightBotGUI(tk.Tk):
     def _create_tray_icon(self):
         """Create a simple tray icon with Restore and Quit menu items."""
         # draw 16x16 monochrome icon
-        img = Image.new("RGB", (16,16), "white")
-        d   = ImageDraw.Draw(img)
-        d.rectangle((2,2,13,13), fill="black")
+        img = Image.new("RGB", (16, 16), "white")
+        d = ImageDraw.Draw(img)
+        d.rectangle((2, 2, 13, 13), fill="black")
 
         menu = pystray.Menu(
             pystray.MenuItem("Restore", self._restore),
-            pystray.MenuItem("Quit",    self._quit_app),
+            pystray.MenuItem("Quit", self._quit_app),
         )
         icon = pystray.Icon("FlightBot", img, "FlightBot", menu)
         threading.Thread(target=icon.run, daemon=True).start()
