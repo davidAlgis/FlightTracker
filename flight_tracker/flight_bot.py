@@ -57,14 +57,15 @@ class FlightBot:
         )
         return hours + mins / 60.0
 
-    def _get_current_price(self) -> float:
+    def _get_current_price(self) -> dict:
         """
         Scrape each round-trip result’s price, airline, and durations,
-        filter out any exceeding max_duration_flight, print each matching
-        flight with its company, and return the lowest price.
+        filter out any exceeding self.max_duration_flight, print each
+        matching flight with its company, and return the cheapest as a dict.
         """
-        options = webdriver.FirefoxOptions()
-        options.headless = True
+        options = Options()
+        # options.headless = True
+        options.add_argument("--headless")
         driver = (
             webdriver.Firefox(
                 executable_path=self.driver_path, options=options
@@ -92,7 +93,7 @@ class FlightBot:
         soup = BeautifulSoup(html, "html.parser")
         results = soup.find_all("div", class_="Fxw9-result-item-container")
 
-        valid_prices = []
+        records = []
         for result in results:
             # company name
             comp_div = result.find("div", class_="J0g6-operator-text")
@@ -106,7 +107,7 @@ class FlightBot:
                 continue
             price_eur = int(digits)
 
-            # extract durations
+            # durations
             leg_divs = result.find_all(
                 "div", class_="xdW8 xdW8-mod-full-airport"
             )
@@ -118,7 +119,7 @@ class FlightBot:
             outward = dur_texts[0] if len(dur_texts) > 0 else ""
             ret = dur_texts[1] if len(dur_texts) > 1 else ""
 
-            # filter by max_duration_flight
+            # filter by max duration
             ok = True
             if (
                 outward
@@ -135,14 +136,27 @@ class FlightBot:
             if not ok:
                 continue
 
-            # print flight with company
+            # print and collect
             print(
-                f"  Flight ({company}): €{price_eur}, "
-                f"Outbound: {outward}, Return: {ret}"
+                f"  Flight ({company}): €{price_eur}, Out: {outward}, Ret: {ret}"
             )
-            valid_prices.append(price_eur)
+            records.append(
+                {
+                    "company": company,
+                    "price": price_eur,
+                    "duration_out": outward,
+                    "duration_return": ret,
+                }
+            )
 
-        return min(valid_prices) if valid_prices else None  # type: ignore
+        if not records:
+            return None  # type: ignore
+
+        # pick cheapest
+        best = min(records, key=lambda r: r["price"])
+        best["dep_date"] = self.dep_date
+        best["arrival_date"] = self.arrival_date
+        return best
 
     def _show_notification(self, price: float):
         """
@@ -155,19 +169,20 @@ class FlightBot:
         )
         self.notifier.show_toast(title, message, duration=10, threaded=True)
 
-    def start(self):
+    def start(self) -> dict:
         """
-        Check flight price once, print filtered results, and notify if below limit.
+        Check flight price once, notify if below limit, and return the best-record dict.
         """
         print(
             f"Checking best price for {self.departure}→{self.destination} on {self.dep_date}…"
         )
-        price = self._get_current_price()
-        if price is None:
+        rec = self._get_current_price()
+        if not rec:
             print("  ❌ No valid flights under max duration.")
-            return
+            return None  # type: ignore
 
-        print(f"  💰 Best price: €{price:.2f}")
-        if price <= self.price_limit:
+        print(f"  💰 Best price: €{rec['price']:.2f}")
+        if rec["price"] <= self.price_limit:
             print("  ✅ Price is below limit! Showing notification…")
-            self._show_notification(price)
+            self._show_notification(rec["price"])
+        return rec
