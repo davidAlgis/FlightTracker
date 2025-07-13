@@ -1,3 +1,5 @@
+# flight_record.py
+
 #!/usr/bin/env python3
 """
 Module to record and retrieve daily minimal flight data in JSON lines.
@@ -44,7 +46,8 @@ class FlightRecord:
     ) -> None:
         """
         Save or update the minimal flight record for a given date.
-        Only overwrite if the new price is lower than any existing record for that date.
+        Only overwrite if the new price is lower than any existing
+        record for that date.
 
         :param date: Date string in YYYY-MM-DD format.
         :param departure: Departure airport IATA code.
@@ -57,7 +60,7 @@ class FlightRecord:
         records = []
         existing_price = None
 
-        # read existing records, track any for the same date
+        # read existing records, skip any for same date
         with open(self.path, "r", encoding="utf-8") as f:
             for line in f:
                 try:
@@ -66,15 +69,15 @@ class FlightRecord:
                     continue
                 if rec.get("date") == date:
                     existing_price = rec.get("price")
-                    # skip appending this old record
+                    # drop the old record for this date
                 else:
                     records.append(rec)
 
-        # if we have an existing record with price <= new price, do nothing
+        # if an existing record is cheaper or equal, do nothing
         if existing_price is not None and existing_price <= price:
             return
 
-        # append new record (either first for this date or better price)
+        # otherwise append new (first or cheaper) record
         new_rec = {
             "date": date,
             "departure": departure,
@@ -86,7 +89,7 @@ class FlightRecord:
         }
         records.append(new_rec)
 
-        # write all back
+        # write back all records
         with open(self.path, "w", encoding="utf-8") as f:
             for rec in records:
                 f.write(json.dumps(rec) + "\n")

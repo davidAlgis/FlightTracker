@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""
+flight_bot.py
+
+A simple flight-price checker that scrapes Kayak once,
+filters by max one-way/round-trip duration, and prints/notifies.
+Returns a dict including departure and return dates.
+"""
+
 import time
 
 from bs4 import BeautifulSoup
@@ -27,8 +35,15 @@ class FlightBot:
         driver_path: str = None,
     ):
         """
-        Initialize FlightBot with route, dates, price limit,
-        and max one-way/round-trip duration in hours.
+        Initialize FlightBot.
+
+        :param departure: IATA code of departure airport
+        :param destination: IATA code of destination airport
+        :param dep_date: outbound date (YYYY-MM-DD)
+        :param arrival_date: return date (YYYY-MM-DD)
+        :param price_limit: price threshold in EUR
+        :param max_duration_flight: max allowed duration in hours
+        :param driver_path: optional path to geckodriver
         """
         self.departure = departure
         self.destination = destination
@@ -47,6 +62,9 @@ class FlightBot:
     def _parse_duration_hours(self, text: str) -> float:
         """
         Convert a string like '18h 55min' into hours as float.
+
+        :param text: duration text
+        :return: duration in hours
         """
         parts = text.split("h")
         hours = int(parts[0])
@@ -62,9 +80,12 @@ class FlightBot:
         Scrape each round-trip result’s price, airline, and durations,
         filter out any exceeding self.max_duration_flight, print each
         matching flight with its company, and return the cheapest as a dict.
+
+        :return: dict with keys company, price, duration_out,
+                 duration_return, dep_date, arrival_date,
+                 departure_date, return_date
         """
         options = Options()
-        # options.headless = True
         options.add_argument("--headless")
         driver = (
             webdriver.Firefox(
@@ -120,20 +141,16 @@ class FlightBot:
             ret = dur_texts[1] if len(dur_texts) > 1 else ""
 
             # filter by max duration
-            ok = True
             if (
                 outward
                 and self._parse_duration_hours(outward)
                 > self.max_duration_flight
             ):
-                ok = False
+                continue
             if (
                 ret
-                and ok
                 and self._parse_duration_hours(ret) > self.max_duration_flight
             ):
-                ok = False
-            if not ok:
                 continue
 
             # print and collect
@@ -154,13 +171,19 @@ class FlightBot:
 
         # pick cheapest
         best = min(records, key=lambda r: r["price"])
+        # include the route dates
         best["dep_date"] = self.dep_date
         best["arrival_date"] = self.arrival_date
+        # also add more descriptive keys
+        best["departure_date"] = self.dep_date
+        best["return_date"] = self.arrival_date
         return best
 
     def _show_notification(self, price: float):
         """
         Show a Windows 11 toast notification with the EUR price.
+
+        :param price: price in EUR
         """
         title = "✈️ Flight Price Alert"
         message = (
@@ -172,6 +195,8 @@ class FlightBot:
     def start(self) -> dict:
         """
         Check flight price once, notify if below limit, and return the best-record dict.
+
+        :return: dict with flight info + dates, or None if no flight
         """
         print(
             f"Checking best price for {self.departure}→{self.destination} on {self.dep_date}…"
