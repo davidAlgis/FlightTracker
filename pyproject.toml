@@ -21,7 +21,8 @@ dependencies = [
   "pandas>=1.3.0",
   "win10toast>=0.9",
   "geopy>=2.4.1",
-  "pystray>=0.19.5"
+  "pystray>=0.19.5",
+  "matplotlib>=3.7.0"
 ]
 
 # Optional project URLs
