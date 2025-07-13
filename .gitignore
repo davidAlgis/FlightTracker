@@ -3,3 +3,6 @@ __pycache__/
 FlightTracker.egg-info/
 *.sublime-workspace
 config.json
+flight_records.jsonl
+env/
+build/
