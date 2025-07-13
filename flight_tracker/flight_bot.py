@@ -4,6 +4,7 @@ import time
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from win10toast import ToastNotifier
@@ -58,16 +59,18 @@ class FlightBot:
 
     def _get_current_price(self) -> float:
         """
-        Scrape each round-trip result’s price and durations,
-        filter out any whose outbound or return exceeds max_duration_flight,
-        print each matching flight, and return the lowest price.
+        Launch headless Firefox, reject cookie popup if present, scrape each
+        round-trip result’s price and durations, print them, and return the lowest price.
         """
-        options = webdriver.ChromeOptions()
-        options.add_experimental_option("excludeSwitches", ["enable-logging"])
+        options = Options()
+        # options.headless = True
+        options.add_argument("--headless")
         driver = (
-            webdriver.Chrome(self.driver_path, options=options)
+            webdriver.Firefox(
+                executable_path=self.driver_path, options=options
+            )
             if self.driver_path
-            else webdriver.Chrome(options=options)
+            else webdriver.Firefox(options=options)
         )
         driver.get(self.url)
 
@@ -91,7 +94,7 @@ class FlightBot:
 
         valid_prices = []
         for result in results:
-            # price in EUR
+            # extract price
             price_div = result.find("div", class_="e2GB-price-text")
             txt = price_div.get_text().strip() if price_div else ""
             digits = "".join(filter(str.isdigit, txt))
@@ -103,32 +106,32 @@ class FlightBot:
             leg_divs = result.find_all(
                 "div", class_="xdW8 xdW8-mod-full-airport"
             )
-            dur_texts = []
+            durations = []
             for leg in leg_divs:
                 dv = leg.find("div", class_="vmXl vmXl-mod-variant-default")
                 if dv:
-                    dur_texts.append(dv.get_text().strip())
-            outward = dur_texts[0] if len(dur_texts) > 0 else ""
-            ret = dur_texts[1] if len(dur_texts) > 1 else ""
+                    durations.append(dv.get_text().strip())
+            outward = durations[0] if len(durations) > 0 else "N/A"
+            ret = durations[1] if len(durations) > 1 else "N/A"
 
             # filter by max_duration_flight
             ok = True
-            if outward:
-                if (
-                    self._parse_duration_hours(outward)
-                    > self.max_duration_flight
-                ):
-                    ok = False
-            if ret and ok:
-                if self._parse_duration_hours(ret) > self.max_duration_flight:
-                    ok = False
+            if (
+                outward
+                and self._parse_duration_hours(outward)
+                > self.max_duration_flight
+            ):
+                ok = False
+            if (
+                ret
+                and self._parse_duration_hours(ret) > self.max_duration_flight
+            ):
+                ok = False
             if not ok:
                 continue
 
-            # print this flight
             print(
-                f"  Flight: €{price_eur}, "
-                f"Outbound: {outward}, Return: {ret}"
+                f"  Flight: €{price_eur}, Outbound: {outward}, Return: {ret}"
             )
             valid_prices.append(price_eur)
 
