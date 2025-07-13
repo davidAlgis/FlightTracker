@@ -59,13 +59,12 @@ class FlightBot:
 
     def _get_current_price(self) -> float:
         """
-        Scrape each round-trip result’s price and durations,
-        filter out any whose outbound or return exceeds max_duration_flight,
-        print each matching flight, and return the lowest price.
+        Scrape each round-trip result’s price, airline, and durations,
+        filter out any exceeding max_duration_flight, print each matching
+        flight with its company, and return the lowest price.
         """
-        options = Options()
-        # options.headless = True
-        options.add_argument("--headless")
+        options = webdriver.FirefoxOptions()
+        options.headless = True
         driver = (
             webdriver.Firefox(
                 executable_path=self.driver_path, options=options
@@ -95,7 +94,11 @@ class FlightBot:
 
         valid_prices = []
         for result in results:
-            # extract price
+            # company name
+            comp_div = result.find("div", class_="J0g6-operator-text")
+            company = comp_div.get_text(strip=True) if comp_div else ""
+
+            # price in EUR
             price_div = result.find("div", class_="e2GB-price-text")
             txt = price_div.get_text().strip() if price_div else ""
             digits = "".join(filter(str.isdigit, txt))
@@ -125,14 +128,17 @@ class FlightBot:
                 ok = False
             if (
                 ret
+                and ok
                 and self._parse_duration_hours(ret) > self.max_duration_flight
             ):
                 ok = False
             if not ok:
                 continue
 
+            # print flight with company
             print(
-                f"  Flight: €{price_eur}, Outbound: {outward}, Return: {ret}"
+                f"  Flight ({company}): €{price_eur}, "
+                f"Outbound: {outward}, Return: {ret}"
             )
             valid_prices.append(price_eur)
 
