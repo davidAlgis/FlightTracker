@@ -184,11 +184,4 @@ class FlightBot:
             return None  # type: ignore
 
         print(f"  💰 Best price: €{rec['price']:.2f}")
-        # always notify on the cheapest under duration
-        self.notifier.show_toast(
-            "✈️ Flight Price Alert",
-            f"€{rec['price']:.2f} for {self.departure}→{self.destination} on {self.dep_date}",
-            duration=10,
-            threaded=True,
-        )
         return rec
