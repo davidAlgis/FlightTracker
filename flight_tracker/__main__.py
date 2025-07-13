@@ -1,14 +1,16 @@
-# flighttracker/__main__.py
+#!/usr/bin/env python3
+"""
+Executable entry point for the Flight Tracker GUI.
+"""
 
-from .gui import FlightBotGUI
+from flight_tracker.gui import FlightBotGUI
 
-def main():
-    """
-    Entry point for the flighttracker package.
-    Starts the Tkinter-based Flight Price Monitor GUI.
-    """
+
+def main() -> None:
+    """Launch the Flight Tracker application."""
     app = FlightBotGUI()
     app.mainloop()
+
 
 if __name__ == "__main__":
     main()
