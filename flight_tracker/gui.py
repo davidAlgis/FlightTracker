@@ -559,17 +559,47 @@ class FlightBotGUI(tk.Tk):
         path = self.record_mgr.path
         if not os.path.exists(path):
             return
-        best = None
+
+        best: dict | None = None
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if best is None or rec["price"] < best["price"]:
-                    best = rec
+
+                # skip any malformed record
+                if not all(
+                    k in rec
+                    for k in (
+                        "date",
+                        "departure",
+                        "destination",
+                        "company",
+                        "price",
+                    )
+                ):
+                    continue
+
+                try:
+                    price = float(rec["price"])
+                except (TypeError, ValueError):
+                    continue
+
+                if best is None or price < best["price"]:
+                    best = {
+                        "date": rec["date"],
+                        "departure": rec["departure"],
+                        "destination": rec["destination"],
+                        "company": rec["company"],
+                        "price": price,
+                        "duration_out": rec.get("duration_out", ""),
+                        "duration_return": rec.get("duration_return", ""),
+                    }
+
         if not best:
             return
+
         text = (
             f"Date: {best['date']}\n"
             f"Route: {best['departure']} → {best['destination']}\n"
@@ -584,28 +614,47 @@ class FlightBotGUI(tk.Tk):
         self.historic_text.configure(state="disabled")
 
     def _plot_history(self):
-        """Plot price vs monitoring date with a one-day margin each side."""
+        """Plot minimal recorded prices versus their monitoring date."""
         path = self.record_mgr.path
         if not os.path.exists(path):
             return
-        dates, prices = [], []
+
+        dates: list[datetime] = []
+        prices: list[float] = []
+
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                d = datetime.strptime(rec["date"], "%Y-%m-%d")
-                dates.append(d)
-                prices.append(rec["price"])
+
+                # make sure required keys exist
+                if "date" not in rec or "price" not in rec:
+                    continue
+
+                try:
+                    dt = datetime.strptime(rec["date"], "%Y-%m-%d")
+                    price_val = float(rec["price"])
+                except (ValueError, TypeError):
+                    # skip malformed date or non-numeric price
+                    continue
+
+                dates.append(dt)
+                prices.append(price_val)
+
         if not dates:
             return
+
         self.ax.clear()
         self.ax.plot_date(dates, prices, "-o")
-        lo, hi = min(dates), max(dates)
-        self.ax.set_xlim(lo - timedelta(days=1), hi + timedelta(days=1))
+
+        lower = min(dates) - timedelta(days=1)
+        upper = max(dates) + timedelta(days=1)
+        self.ax.set_xlim(lower, upper)
         self.ax.set_xlabel("Monitoring Date")
         self.ax.set_ylabel("Price (€)")
+
         self.figure.autofmt_xdate()
         self.canvas.draw()
 
