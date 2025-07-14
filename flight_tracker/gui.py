@@ -632,11 +632,17 @@ class FlightBotGUI(tk.Tk):
         self.destroy()
 
     def _create_tray_icon(self):
-        """Create a simple tray icon with Restore and Quit menu items."""
-        # draw 16x16 monochrome icon
-        img = Image.new("RGB", (16, 16), "white")
-        d = ImageDraw.Draw(img)
-        d.rectangle((2, 2, 13, 13), fill="black")
+        """Create a tray icon using the project's ICO asset with Restore and Quit menu."""
+        import sys
+
+        # determine base path (handles PyInstaller _MEIPASS)
+        base_path = getattr(
+            sys, "_MEIPASS", os.path.dirname(os.path.dirname(__file__))
+        )
+        icon_path = os.path.join(base_path, "assets", "flight_tracker.ico")
+
+        # load the ICO file
+        img = Image.open(icon_path)
 
         menu = pystray.Menu(
             pystray.MenuItem("Restore", self._restore),
