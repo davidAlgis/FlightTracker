@@ -1,36 +1,72 @@
 #!/usr/bin/env python3
 """
-Module to record and retrieve minimal flight data per hour in JSON lines.
+flight_record.py
 
-Each record contains:
-- datetime (YYYY-MM-DD-HH)
-- departure IATA code
-- destination IATA code
-- airline/company name
-- outbound duration (e.g. "18h 55min")
-- return duration (e.g. "26h 10min")
-- price (float)
+Lightweight persistence layer for the flight-price monitor.
+Stores one JSON line per *hourly* scrape.
+
+Each record contains
+    • datetime          YYYY-MM-DD-HH (local time when scraped)
+    • departure         IATA code
+    • destination       IATA code
+    • company           carrier(s)
+    • duration_out      outbound duration (text)
+    • duration_return   return duration (text)
+    • price             float (€)
 """
+
+from __future__ import annotations
 
 import json
 import os
+import sys
+from pathlib import Path
 from typing import Dict, Optional
 
 
+def _default_store_file() -> str:
+    """
+    Return a user-writable path for *flight_records.jsonl*.
+
+    * When running a **frozen** app (cx_Freeze, PyInstaller, …) we avoid
+      writing into the installation directory (often read-only under
+      *Program Files*).
+      – Windows … ``%LOCALAPPDATA%\\flight_tracker\\flight_records.jsonl``
+      – Linux/macOS … ``$XDG_DATA_HOME/flight_tracker/flight_records.jsonl``
+        falling back to ``~/.local/share/flight_tracker/…``
+
+    * In normal source runs we keep the file in the current working dir,
+      preserving previous behaviour.
+    """
+    if getattr(sys, "frozen", False):  # inside bundled exe
+        if os.name == "nt":
+            root = os.getenv("LOCALAPPDATA") or Path.home()
+        else:  # POSIX
+            root = (
+                os.getenv("XDG_DATA_HOME") or Path.home() / ".local" / "share"
+            )
+        store_dir = Path(root) / "flight_tracker"
+        store_dir.mkdir(parents=True, exist_ok=True)
+        return str(store_dir / "flight_records.jsonl")
+
+    # developer run → relative file
+    return "flight_records.jsonl"
+
+
 class FlightRecord:
-    """Manage appending and loading minimal-hourly flight records."""
+    """
+    Simple JSON-lines store keeping only the *lowest* price per hour.
+    """
 
-    def __init__(self, path: str = "flight_records.jsonl"):
-        """
-        Initialize the FlightRecord manager.
+    def __init__(self, path: str | None = None) -> None:
+        self.path: str = path or _default_store_file()
 
-        :param path: File path for JSON lines storage.
-        """
-        self.path = path
-        if not os.path.exists(self.path):
-            with open(self.path, "w", encoding="utf-8"):
-                pass
+        # guarantee that the file exists and is writable
+        Path(self.path).touch(exist_ok=True)
 
+    # ------------------------------------------------------------------ #
+    # public API
+    # ------------------------------------------------------------------ #
     def save_record(
         self,
         datetime_key: str,
@@ -42,64 +78,54 @@ class FlightRecord:
         price: float,
     ) -> None:
         """
-        Save or update the minimal flight record for a given hour.
-        Only overwrite if the new price is lower than any existing
-        record for that datetime_key (YYYY-MM-DD-HH).
+        Persist a scrape result.
 
-        :param datetime_key: Date and hour string in YYYY-MM-DD-HH format.
-        :param departure: Departure airport IATA code.
-        :param destination: Destination airport IATA code.
-        :param company: Airline or company name.
-        :param duration_out: Outbound flight duration.
-        :param duration_return: Return flight duration.
-        :param price: Price in euros.
+        If an entry already exists for *datetime_key* it is replaced **only
+        if** the new price is lower.
         """
-        records = []
-        existing_price = None
+        records: list[dict] = []
+        existing_price: float | None = None
 
-        with open(self.path, "r", encoding="utf-8") as f:
-            for line in f:
+        with open(self.path, "r", encoding="utf-8") as fh:
+            for line in fh:
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+
                 if rec.get("datetime") == datetime_key:
                     existing_price = rec.get("price")
                 else:
                     records.append(rec)
 
-        # if an existing record is cheaper or equal, do nothing
+        # nothing to do if stored price is already cheaper (or equal)
         if existing_price is not None and existing_price <= price:
             return
 
-        # otherwise append new (first or cheaper) record
-        new_rec = {
-            "datetime": datetime_key,
-            "departure": departure,
-            "destination": destination,
-            "company": company,
-            "duration_out": duration_out,
-            "duration_return": duration_return,
-            "price": price,
-        }
-        records.append(new_rec)
+        records.append(
+            {
+                "datetime": datetime_key,
+                "departure": departure,
+                "destination": destination,
+                "company": company,
+                "duration_out": duration_out,
+                "duration_return": duration_return,
+                "price": price,
+            }
+        )
 
-        with open(self.path, "w", encoding="utf-8") as f:
+        with open(self.path, "w", encoding="utf-8") as fh:
             for rec in records:
-                f.write(json.dumps(rec) + "\n")
+                fh.write(json.dumps(rec) + "\n")
 
+    # ------------------------------------------------------------------ #
     def load_record(self, datetime_key: str) -> Optional[Dict]:
-        """
-        Load the flight record for a given hour.
-
-        :param datetime_key: Date and hour string in YYYY-MM-DD-HH format.
-        :return: The record dict, or None if not found.
-        """
-        if not os.path.exists(self.path):
+        """Return the record for *datetime_key* or ``None``."""
+        if not Path(self.path).exists():
             return None
 
-        with open(self.path, "r", encoding="utf-8") as f:
-            for line in f:
+        with open(self.path, "r", encoding="utf-8") as fh:
+            for line in fh:
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
