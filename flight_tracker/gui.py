@@ -381,18 +381,22 @@ class FlightBotGUI(tk.Tk):
 
     def _monitor_loop(self, deps, dests, pairs, params):
         """
-        Check each departure×destination×date pairing, record results,
-        notify on new lows or large price jumps, then filter airports.
+        Check each departure×destination×date pairing, record results
+        hourly, notify on new lows or large price jumps, then filter airports.
         """
+        from datetime import datetime
+
         while not self._stop_event.is_set():
-            self.status_label.config(text="Status: checking flights…")
+            self.status_label.config(text="Status: checking flights...")
             self.progress.start()
 
             for dep, dest in itertools.product(deps, dests):
                 best_for_pair = None
+
                 for dd, rd in pairs:
                     if self._stop_event.is_set():
                         break
+
                     self.status_label.config(
                         text=f"Checking {dep}→{dest} on {dd} → {rd}"
                     )
@@ -411,24 +415,20 @@ class FlightBotGUI(tk.Tk):
                     if best_for_pair is None or price < best_for_pair:
                         best_for_pair = price
 
-                    today = datetime.now().strftime("%Y-%m-%d")
-                    global_prev = self._get_global_best_price()
-                    three_days = (datetime.now() - timedelta(days=3)).strftime(
-                        "%Y-%m-%d"
-                    )
-                    old_rec = self.record_mgr.load_record(three_days)
-
+                    # record hourly minimal price
+                    timestamp = datetime.now().strftime("%Y-%m-%d-%H")
                     self.record_mgr.save_record(
-                        date=today,
-                        departure=dep,
-                        destination=dest,
-                        company=rec["company"],
-                        duration_out=rec["duration_out"],
-                        duration_return=rec["duration_return"],
-                        price=price,
+                        timestamp,
+                        dep,
+                        dest,
+                        rec["company"],
+                        rec["duration_out"],
+                        rec["duration_return"],
+                        price,
                     )
 
                     # notify on new all-time low
+                    global_prev = self._get_global_best_price()
                     if global_prev is None or price < global_prev:
                         self.notifier.show_toast(
                             "New All-Time Low!",
@@ -437,7 +437,11 @@ class FlightBotGUI(tk.Tk):
                             threaded=True,
                         )
 
-                    # notify on >10% jump vs 3-day old price
+                    # notify on >10% jump vs 3 days ago
+                    three_days_ago = (
+                        datetime.now() - timedelta(days=3)
+                    ).strftime("%Y-%m-%d-%H")
+                    old_rec = self.record_mgr.load_record(three_days_ago)
                     if old_rec and price > old_rec["price"] * 1.1:
                         diff = price - old_rec["price"]
                         pct = diff / old_rec["price"] * 100
@@ -456,14 +460,15 @@ class FlightBotGUI(tk.Tk):
                 if self._stop_event.is_set():
                     break
 
+            # after initial sweep, filter out poor airports once
             if self._first_pass:
                 self._filter_airports()
                 self._first_pass = False
 
             self.progress.stop()
             self.status_label.config(text="Status: waiting")
-            wait_time_min = 30
-            for _ in range(wait_time_min):
+            # wait 30 minutes before next sweep
+            for _ in range(30):
                 if self._stop_event.is_set():
                     break
                 time.sleep(60)
