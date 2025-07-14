@@ -4,11 +4,8 @@ setup.py
 
 Creates a virtual environment in env/, installs the runtime
 dependencies declared in pyproject.toml, and builds a one-file
-executable with PyInstaller into build/ (icon: assets/flight_tracker.ico).
-
-Usage (run from repository root):
-
-    python setup.py
+executable with PyInstaller into build/ (icon: assets/flight_tracker.ico,
+data assets under assets/).
 """
 
 from __future__ import annotations
@@ -78,6 +75,9 @@ def main() -> None:
 
     BUILD_DIR.mkdir(exist_ok=True)
 
+    # include the entire assets/ folder so that tray‐icon and other data is available
+    data_spec = f"{ICON_PATH}{os.pathsep}assets"
+
     subprocess.check_call(
         [
             py_bin,
@@ -89,6 +89,8 @@ def main() -> None:
             "Flight Tracker",
             "--icon",
             str(ICON_PATH),
+            "--add-data",
+            data_spec,
             "--distpath",
             str(BUILD_DIR),
             str(ENTRY_SCRIPT),
