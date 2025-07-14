@@ -1,11 +1,9 @@
-# flight_record.py
-
 #!/usr/bin/env python3
 """
-Module to record and retrieve daily minimal flight data in JSON lines.
+Module to record and retrieve minimal flight data per hour in JSON lines.
 
 Each record contains:
-- date (YYYY-MM-DD)
+- datetime (YYYY-MM-DD-HH)
 - departure IATA code
 - destination IATA code
 - airline/company name
@@ -20,7 +18,7 @@ from typing import Dict, Optional
 
 
 class FlightRecord:
-    """Manage appending and loading minimal-daily flight records."""
+    """Manage appending and loading minimal-hourly flight records."""
 
     def __init__(self, path: str = "flight_records.jsonl"):
         """
@@ -29,14 +27,13 @@ class FlightRecord:
         :param path: File path for JSON lines storage.
         """
         self.path = path
-        # ensure file exists
         if not os.path.exists(self.path):
             with open(self.path, "w", encoding="utf-8"):
                 pass
 
     def save_record(
         self,
-        date: str,
+        datetime_key: str,
         departure: str,
         destination: str,
         company: str,
@@ -45,11 +42,11 @@ class FlightRecord:
         price: float,
     ) -> None:
         """
-        Save or update the minimal flight record for a given date.
+        Save or update the minimal flight record for a given hour.
         Only overwrite if the new price is lower than any existing
-        record for that date.
+        record for that datetime_key (YYYY-MM-DD-HH).
 
-        :param date: Date string in YYYY-MM-DD format.
+        :param datetime_key: Date and hour string in YYYY-MM-DD-HH format.
         :param departure: Departure airport IATA code.
         :param destination: Destination airport IATA code.
         :param company: Airline or company name.
@@ -60,16 +57,14 @@ class FlightRecord:
         records = []
         existing_price = None
 
-        # read existing records, skip any for same date
         with open(self.path, "r", encoding="utf-8") as f:
             for line in f:
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if rec.get("date") == date:
+                if rec.get("datetime") == datetime_key:
                     existing_price = rec.get("price")
-                    # drop the old record for this date
                 else:
                     records.append(rec)
 
@@ -79,7 +74,7 @@ class FlightRecord:
 
         # otherwise append new (first or cheaper) record
         new_rec = {
-            "date": date,
+            "datetime": datetime_key,
             "departure": departure,
             "destination": destination,
             "company": company,
@@ -89,16 +84,15 @@ class FlightRecord:
         }
         records.append(new_rec)
 
-        # write back all records
         with open(self.path, "w", encoding="utf-8") as f:
             for rec in records:
                 f.write(json.dumps(rec) + "\n")
 
-    def load_record(self, date: str) -> Optional[Dict]:
+    def load_record(self, datetime_key: str) -> Optional[Dict]:
         """
-        Load the flight record for a given date.
+        Load the flight record for a given hour.
 
-        :param date: Date string in YYYY-MM-DD format.
+        :param datetime_key: Date and hour string in YYYY-MM-DD-HH format.
         :return: The record dict, or None if not found.
         """
         if not os.path.exists(self.path):
@@ -110,6 +104,6 @@ class FlightRecord:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if rec.get("date") == date:
+                if rec.get("datetime") == datetime_key:
                     return rec
         return None

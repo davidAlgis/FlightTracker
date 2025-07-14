@@ -448,7 +448,8 @@ class FlightBotGUI(tk.Tk):
 
             self.progress.stop()
             self.status_label.config(text="Status: waiting")
-            for _ in range(4 * 60):
+            wait_time_min = 30
+            for _ in range(wait_time_min):
                 if self._stop_event.is_set():
                     break
                 time.sleep(60)
