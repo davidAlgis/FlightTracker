@@ -44,6 +44,14 @@ class FlightBotGUI(tk.Tk):
         self.title("Flight Price Monitor")
         self.resizable(True, True)
 
+        import sys
+
+        base_path = getattr(
+            sys, "_MEIPASS", os.path.dirname(os.path.dirname(__file__))
+        )
+        icon_path = os.path.join(base_path, "assets", "flight_tracker.ico")
+        self.iconbitmap(icon_path)
+
         self._configure_grid()
         self._create_config_frame()
         self._create_result_frame()
@@ -71,6 +79,12 @@ class FlightBotGUI(tk.Tk):
             )
 
         self._load_saved_config()
+
+        # if a config.json already exists, start minimized to tray
+        if os.path.exists("config.json"):
+            self.withdraw()
+            self.tray_icon.visible = True
+
         self._load_historic_best()
         self._plot_history()
 
