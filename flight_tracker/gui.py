@@ -44,13 +44,12 @@ class FlightBotGUI(tk.Tk):
         self.title("Flight Price Monitor")
         self.resizable(True, True)
 
-        import sys
-
-        base_path = getattr(
-            sys, "_MEIPASS", os.path.dirname(os.path.dirname(__file__))
-        )
-        icon_path = os.path.join(base_path, "assets", "flight_tracker.ico")
-        self.iconbitmap(icon_path)
+        icon_path = self._asset_path("flight_tracker.ico")
+        try:
+            self.iconbitmap(icon_path)
+        except tk.TclError:
+            # silently ignore if icon cannot be loaded (Linux/Wayland, etc.)
+            pass
 
         self._configure_grid()
         self._create_config_frame()
@@ -554,108 +553,119 @@ class FlightBotGUI(tk.Tk):
         cfg["destination"] = display["destination"]
         self.config_mgr.save(cfg)
 
-    def _load_historic_best(self):
-        """Load the all-time best record and display it."""
-        path = self.record_mgr.path
-        if not os.path.exists(path):
+        # ------------------------------------------------------------------ #
+
+    # historic-best panel & history graph
+    # ------------------------------------------------------------------ #
+    def _load_historic_best(self) -> None:
+        """
+        Read *flight_records.jsonl* and show the single cheapest record ever
+        found.
+        Works with both legacy daily records (key **date**) and the new
+        hourly records (key **datetime**, format *YYYY-MM-DD-HH*).
+        """
+        if not os.path.exists(self.record_mgr.path):
             return
 
         best: dict | None = None
-        with open(path, "r", encoding="utf-8") as f:
+        with open(self.record_mgr.path, "r", encoding="utf-8") as f:
             for line in f:
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
 
-                # skip any malformed record
-                if not all(
-                    k in rec
-                    for k in (
-                        "date",
-                        "departure",
-                        "destination",
-                        "company",
-                        "price",
-                    )
-                ):
+                # support both schemas ----------------------------------------------------------------
+                ts_key = "datetime" if "datetime" in rec else "date"
+                if ts_key not in rec or "price" not in rec:
                     continue
 
                 try:
-                    price = float(rec["price"])
+                    price_val = float(rec["price"])
                 except (TypeError, ValueError):
                     continue
+                # -------------------------------------------------------------------------------------
 
-                if best is None or price < best["price"]:
+                if best is None or price_val < best["price"]:
                     best = {
-                        "date": rec["date"],
-                        "departure": rec["departure"],
-                        "destination": rec["destination"],
-                        "company": rec["company"],
-                        "price": price,
+                        "ts": rec[ts_key],
+                        "departure": rec.get("departure", ""),
+                        "destination": rec.get("destination", ""),
+                        "company": rec.get("company", ""),
+                        "price": price_val,
                         "duration_out": rec.get("duration_out", ""),
-                        "duration_return": rec.get("duration_return", ""),
+                        "duration_ret": rec.get("duration_return", ""),
                     }
 
-        if not best:
+        if best is None:
             return
 
+        # display ----------------------------------------------------------------
+        date_display = best["ts"]  # keep full YYYY-MM-DD(-HH) string
         text = (
-            f"Date: {best['date']}\n"
+            f"Date/Hour: {date_display}\n"
             f"Route: {best['departure']} → {best['destination']}\n"
             f"Company: {best['company']}\n"
             f"Price: €{best['price']:.2f}\n"
             f"Outbound: {best['duration_out']}\n"
-            f"Return:   {best['duration_return']}\n"
+            f"Return:   {best['duration_ret']}\n"
         )
         self.historic_text.configure(state="normal")
         self.historic_text.delete("1.0", END)
         self.historic_text.insert(END, text)
         self.historic_text.configure(state="disabled")
 
-    def _plot_history(self):
-        """Plot minimal recorded prices versus their monitoring date."""
-        path = self.record_mgr.path
-        if not os.path.exists(path):
+    # ------------------------------------------------------------------ #
+    def _plot_history(self) -> None:
+        """
+        Plot *all* stored prices against the timestamp they were recorded
+        (supports **date** or **datetime** keys).
+        If the record contains an hourly timestamp (YYYY-MM-DD-HH) the hour
+        is also shown on the X-axis; otherwise only the day is plotted.
+        """
+        if not os.path.exists(self.record_mgr.path):
             return
 
-        dates: list[datetime] = []
+        times: list[datetime] = []
         prices: list[float] = []
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(self.record_mgr.path, "r", encoding="utf-8") as f:
             for line in f:
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
 
-                # make sure required keys exist
-                if "date" not in rec or "price" not in rec:
+                ts_str = rec.get("datetime") or rec.get("date")
+                if ts_str is None or "price" not in rec:
                     continue
 
+                # choose correct format automatically ----------------------------
                 try:
-                    dt = datetime.strptime(rec["date"], "%Y-%m-%d")
+                    fmt = (
+                        "%Y-%m-%d-%H"
+                        if len(ts_str.split("-")) == 4
+                        else "%Y-%m-%d"
+                    )
+                    ts = datetime.strptime(ts_str, fmt)
                     price_val = float(rec["price"])
                 except (ValueError, TypeError):
-                    # skip malformed date or non-numeric price
                     continue
+                # ---------------------------------------------------------------
 
-                dates.append(dt)
+                times.append(ts)
                 prices.append(price_val)
 
-        if not dates:
+        if not times:
             return
 
         self.ax.clear()
-        self.ax.plot_date(dates, prices, "-o")
+        self.ax.plot_date(times, prices, "-o")
 
-        lower = min(dates) - timedelta(days=1)
-        upper = max(dates) + timedelta(days=1)
-        self.ax.set_xlim(lower, upper)
-        self.ax.set_xlabel("Monitoring Date")
+        self.ax.set_xlabel("Monitoring timestamp")
         self.ax.set_ylabel("Price (€)")
-
         self.figure.autofmt_xdate()
+
         self.canvas.draw()
 
     def _parse_dates(self, s):
@@ -701,22 +711,13 @@ class FlightBotGUI(tk.Tk):
         self.destroy()
 
     def _create_tray_icon(self):
-        """Create a tray icon using the project's ICO asset or a fallback."""
-        import sys
+        """Create a tray icon using the project’s ICO asset or a fallback."""
+        icon_path = self._asset_path("flight_tracker.ico")
 
-        base = getattr(
-            sys, "_MEIPASS", os.path.dirname(os.path.dirname(__file__))
-        )
-        candidates = [
-            os.path.join(base, "assets", "flight_tracker.ico"),
-            os.path.join(
-                base, "flight_tracker", "assets", "flight_tracker.ico"
-            ),
-        ]
-        icon_path = next((p for p in candidates if os.path.exists(p)), None)
-        if icon_path:
+        if os.path.exists(icon_path):
             img = Image.open(icon_path)
         else:
+            # 16×16 white square with a black border as a minimalist fallback
             img = Image.new("RGB", (16, 16), "white")
             d = ImageDraw.Draw(img)
             d.rectangle((2, 2, 13, 13), fill="black")
@@ -728,6 +729,28 @@ class FlightBotGUI(tk.Tk):
         icon = pystray.Icon("FlightBot", img, "FlightBot", menu)
         threading.Thread(target=icon.run, daemon=True).start()
         self.tray_icon = icon
+
+    # ------------------------------------------------------------------ #
+    # utility paths
+    # ------------------------------------------------------------------ #
+    def _asset_path(self, *parts: str) -> str:
+        """
+        Return an absolute path inside the *assets/* folder that works both
+        • in development (ordinary Python interpreter) and
+        • in a frozen application built with cx_Freeze.
+
+        When frozen, ``sys.frozen`` is True and ``sys.executable`` points to
+        the bundled executable’s directory, which already contains the copied
+        *assets/* folder.
+        """
+        import sys
+
+        if getattr(sys, "frozen", False):  # cx_Freeze / py2exe / etc.
+            root = os.path.dirname(sys.executable)
+        else:  # normal source run
+            root = os.path.dirname(os.path.dirname(__file__))
+
+        return os.path.join(root, "assets", *parts)
 
 
 if __name__ == "__main__":
