@@ -22,7 +22,8 @@ from tkinter import END, messagebox, simpledialog, ttk
 import matplotlib
 import pandas as pd
 import pystray
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
+                                               NavigationToolbar2Tk)
 from matplotlib.figure import Figure
 from PIL import Image, ImageDraw
 from win10toast import ToastNotifier
@@ -148,21 +149,23 @@ class FlightBotGUI(tk.Tk):
         )
         self.config_frame = frame
 
-    def _create_result_frame(self):
-        """Right-hand panel showing historic best flight and price history graph."""
+    def _create_result_frame(self) -> None:
+        """Create the right‑hand panel with historic‑best info and an interactive graph."""
         frame = tk.LabelFrame(self, text="Results")
         frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
-        frame.rowconfigure(0, weight=0)
-        frame.rowconfigure(1, weight=1)
+        frame.rowconfigure(0, weight=0)  # text box
+        frame.rowconfigure(1, weight=1)  # figure
         frame.columnconfigure(0, weight=1)
 
-        hf = tk.LabelFrame(frame, text="Historic Best Flight")
-        hf.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 2))
+        # ── historic best ───────────────────────────────────────────────────────
+        hbf = tk.LabelFrame(frame, text="Historic Best Flight")
+        hbf.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 2))
         self.historic_text = tk.Text(
-            hf, state="disabled", height=5, wrap="word"
+            hbf, height=5, wrap="word", state="disabled"
         )
         self.historic_text.pack(fill="both", expand=True, padx=5, pady=5)
 
+        # ── interactive graph ───────────────────────────────────────────────────
         gf = tk.LabelFrame(frame, text="Price History")
         gf.grid(row=1, column=0, sticky="nsew", padx=5, pady=(2, 5))
         gf.rowconfigure(0, weight=1)
@@ -170,11 +173,31 @@ class FlightBotGUI(tk.Tk):
 
         self.figure = Figure(figsize=(5, 4), dpi=100)
         self.ax = self.figure.add_subplot(111)
-        self.ax.set_xlabel("Monitoring Date")
+        self.ax.set_xlabel("Monitoring timestamp")
         self.ax.set_ylabel("Price (€)")
-        canvas = FigureCanvasTkAgg(self.figure, master=gf)
-        canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
-        self.canvas = canvas
+
+        # canvas + native Matplotlib toolbar (zoom / pan / save)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=gf)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+        toolbar = NavigationToolbar2Tk(self.canvas, gf, pack_toolbar=False)
+        toolbar.update()
+        toolbar.grid(row=1, column=0, sticky="ew")
+
+        # annotation (tooltip) for data‑point values – created once, reused later
+        self._point_annotation = self.ax.annotate(
+            text="",
+            xy=(0, 0),
+            xytext=(10, 10),
+            textcoords="offset points",
+            bbox=dict(boxstyle="round", fc="yellow", ec="black", lw=0.5),
+            arrowprops=dict(arrowstyle="->"),
+            visible=False,
+        )
+
+        # connect pick event (fired when the user clicks on a data point)
+        self.canvas.mpl_connect("pick_event", self._on_pick)
 
         self.result_frame = frame
 
@@ -618,10 +641,10 @@ class FlightBotGUI(tk.Tk):
     # ------------------------------------------------------------------ #
     def _plot_history(self) -> None:
         """
-        Plot *all* stored prices against the timestamp they were recorded
-        (supports **date** or **datetime** keys).
-        If the record contains an hourly timestamp (YYYY-MM-DD-HH) the hour
-        is also shown on the X-axis; otherwise only the day is plotted.
+        Plot all stored prices versus their timestamp.
+
+        • Supports both legacy “date” (daily) and new “datetime” (hourly) keys
+        • Each point is “pickable” so a left‑click displays an annotated tooltip
         """
         if not os.path.exists(self.record_mgr.path):
             return
@@ -629,8 +652,8 @@ class FlightBotGUI(tk.Tk):
         times: list[datetime] = []
         prices: list[float] = []
 
-        with open(self.record_mgr.path, "r", encoding="utf-8") as f:
-            for line in f:
+        with open(self.record_mgr.path, "r", encoding="utf-8") as fh:
+            for line in fh:
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
@@ -640,7 +663,6 @@ class FlightBotGUI(tk.Tk):
                 if ts_str is None or "price" not in rec:
                     continue
 
-                # choose correct format automatically ----------------------------
                 try:
                     fmt = (
                         "%Y-%m-%d-%H"
@@ -651,7 +673,6 @@ class FlightBotGUI(tk.Tk):
                     price_val = float(rec["price"])
                 except (ValueError, TypeError):
                     continue
-                # ---------------------------------------------------------------
 
                 times.append(ts)
                 prices.append(price_val)
@@ -660,13 +681,34 @@ class FlightBotGUI(tk.Tk):
             return
 
         self.ax.clear()
-        self.ax.plot_date(times, prices, "-o")
+        # picker=5 → 5‑pt tolerance for easier clicking
+        self.ax.plot_date(times, prices, "-o", picker=5)
 
         self.ax.set_xlabel("Monitoring timestamp")
         self.ax.set_ylabel("Price (€)")
         self.figure.autofmt_xdate()
-
         self.canvas.draw()
+
+    def _on_pick(self, event) -> None:
+        """
+        Show the (timestamp, price) of a clicked data point in a tooltip.
+
+        The annotation is moved & updated instead of recreated to prevent
+        accumulation of multiple labels.
+        """
+        # artist could be a Line2D (returned by plot_date)
+        if hasattr(event, "artist") and event.ind:
+            ind = event.ind[0]  # first picked point
+            xdata, ydata = event.artist.get_data()
+            x, y = xdata[ind], ydata[ind]
+
+            # update annotation text & position
+            ts_str = matplotlib.dates.num2date(x).strftime("%Y-%m-%d %H:%M")
+            self._point_annotation.xy = (x, y)
+            self._point_annotation.set_text(f"{ts_str}\n€{y:.2f}")
+            self._point_annotation.set_visible(True)
+
+            self.canvas.draw_idle()
 
     def _parse_dates(self, s):
         """Parse 'YYYY-MM-DD' or 'YYYY-MM-DD-YYYY-MM-DD' into a list of datetimes."""
