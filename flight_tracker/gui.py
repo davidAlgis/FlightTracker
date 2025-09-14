@@ -518,12 +518,23 @@ class FlightBotGUI(tk.Tk):
 
     def _monitor_loop(self, deps, dests, pairs, params):
         """
-        Check flights either exhaustively for a single (dep,ret) pair
-        or randomly sample (dep date, duration, airport pair) inside the window.
-        Records results (including dep_date/arrival_date), notifies on new lows,
-        then filters airports. Supports instant cancel.
+        Continuous monitoring.
+
+        Random mode:
+          - Draw departure airport, destination airport, and departure date
+            from adaptive probability distributions (persisted across runs).
+          - Duration remains uniformly sampled from user-provided durations.
+          - After each attempt, gently update probabilities based on result quality.
+
+        Exhaustive mode:
+          - Unchanged behavior (weights are not used outside random sampling).
+
+        We still record results hourly and show notifications, and cancellation remains immediate.
         """
         from datetime import datetime
+
+        # Ensure weights are loaded once the worker starts
+        _ = self._get_weights()
 
         random_mode = bool(params.get("random_mode"))
         window_start = params.get("window_start")
@@ -537,29 +548,49 @@ class FlightBotGUI(tk.Tk):
                 self.progress.start()
 
                 if random_mode:
+                    # Initialize airport pools in the weights tables
+                    deps_pool = list(deps)
+                    dests_pool = list(dests)
+                    self._init_weights_for_category("dep_airports", deps_pool)
+                    self._init_weights_for_category(
+                        "dest_airports", dests_pool
+                    )
+
                     for _ in range(samples_per_sweep):
                         if self._stop_event.is_set():
                             break
-                        if not deps or not dests or not durations:
+                        if not deps_pool or not dests_pool or not durations:
                             continue
 
-                        dep = random.choice(deps)
-                        dest = random.choice(dests)
+                        # 1) Duration is sampled uniformly (requirement only mentions 3 weighted elements)
                         dur_days = int(random.choice(durations))
 
+                        # 2) Build the valid departure-date pool for this duration and ensure weights
                         latest_dep = window_end - timedelta(days=dur_days)
                         if latest_dep < window_start:
+                            # No valid departure for this duration in this window
                             continue
+                        num_days = (latest_dep - window_start).days + 1
+                        dates_pool = [
+                            (window_start + timedelta(days=i)).strftime(
+                                "%Y-%m-%d"
+                            )
+                            for i in range(num_days)
+                        ]
+                        self._ensure_date_weights(dates_pool)
 
-                        delta_days = (latest_dep - window_start).days
-                        dep_dt = window_start + timedelta(
-                            days=random.randint(0, delta_days)
+                        # 3) Draw departure airport, destination airport, and date using adaptive weights
+                        dep = self._choose_weighted("dep_airports", deps_pool)
+                        dest = self._choose_weighted(
+                            "dest_airports", dests_pool
                         )
+                        date_key = self._choose_weighted("dates", dates_pool)
+                        dep_dt = datetime.strptime(date_key, "%Y-%m-%d")
                         ret_dt = dep_dt + timedelta(days=dur_days)
-
                         dd = dep_dt.strftime("%Y-%m-%d")
                         rd = ret_dt.strftime("%Y-%m-%d")
 
+                        # 4) Run the check
                         self.status_label.config(
                             text=f"Checking {dep}->{dest} on {dd} -> {rd}"
                         )
@@ -572,14 +603,31 @@ class FlightBotGUI(tk.Tk):
                             cancel_event=self._stop_event,
                         )
                         self._current_bot = bot
+
+                        prev_best = self._get_global_best_price()
                         rec = bot.start()
                         self._current_bot = None
                         if self._stop_event.is_set():
                             break
+
+                        # 5) Update weights based on result quality (or failure)
                         if not rec:
+                            # No flight matched constraints
+                            self._update_adaptive_after_result(
+                                dep,
+                                dest,
+                                date_key,
+                                deps_pool,
+                                dests_pool,
+                                dates_pool,
+                                result_price=None,
+                                prev_best_price=prev_best,
+                            )
                             continue
 
                         price = rec["price"]
+
+                        # Save the record (with dates)
                         timestamp = datetime.now().strftime("%Y-%m-%d-%H")
                         self.record_mgr.save_record(
                             timestamp,
@@ -593,6 +641,19 @@ class FlightBotGUI(tk.Tk):
                             rec.get("arrival_date"),
                         )
 
+                        # Adaptive update vs. previous best (before saving)
+                        self._update_adaptive_after_result(
+                            dep,
+                            dest,
+                            date_key,
+                            deps_pool,
+                            dests_pool,
+                            dates_pool,
+                            result_price=float(price),
+                            prev_best_price=prev_best,
+                        )
+
+                        # Notifications and visuals
                         global_prev = self._get_global_best_price()
                         if global_prev is None or price < global_prev:
                             self.notifier.show_toast(
@@ -624,6 +685,7 @@ class FlightBotGUI(tk.Tk):
                         self._plot_history()
 
                 else:
+                    # Exhaustive over all airport pairs for the single (dep, ret) pair
                     dep_ret_pairs = pairs or []
                     for dep, dest in itertools.product(deps, dests):
                         best_for_pair = None
@@ -644,6 +706,7 @@ class FlightBotGUI(tk.Tk):
                                 cancel_event=self._stop_event,
                             )
                             self._current_bot = bot
+                            prev_best = self._get_global_best_price()
                             rec = bot.start()
                             self._current_bot = None
                             if self._stop_event.is_set():
@@ -701,6 +764,8 @@ class FlightBotGUI(tk.Tk):
                         if self._stop_event.is_set():
                             break
 
+                # No idle waiting here (continuous). If you want a tiny breather to keep CPU low,
+                # you could add a very small sleep guarded by the cancel flag.
                 self.progress.stop()
                 self.status_label.config(text="Status: continuing...")
 
@@ -1267,6 +1332,255 @@ class FlightBotGUI(tk.Tk):
         else:
             root = os.path.dirname(os.path.dirname(__file__))
         return os.path.join(root, "assets", *parts)
+
+    def _weights_path(self) -> str:
+        """
+        Return the path where adaptive sampling weights are stored.
+        Lives next to config.json by default as weights.json.
+        """
+        cfg_path = getattr(self.config_mgr, "path", "config.json")
+        root = os.path.dirname(os.path.abspath(cfg_path))
+        return os.path.join(root, "weights.json")
+
+    def _load_weights(self) -> dict:
+        """
+        Load weights from disk. Structure:
+        {
+            "dep_airports": { "CDG": 0.5, "ORY": 0.5, ... },
+            "dest_airports": { "JFK": 0.33, "EWR": 0.33, "LGA": 0.34, ... },
+            "dates": { "2026-02-01": 0.01, ... }
+        }
+
+        Stored values are non-negative "raw" weights. When sampling over a pool,
+        we normalize to probabilities. Unseen keys default to 1.0.
+        """
+        path = self._weights_path()
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                    # Basic shape guard
+                    if not isinstance(data, dict):
+                        raise ValueError
+                    for k in ("dep_airports", "dest_airports", "dates"):
+                        if k not in data or not isinstance(data[k], dict):
+                            data[k] = {}
+                    return data
+        except Exception:
+            pass
+        return {"dep_airports": {}, "dest_airports": {}, "dates": {}}
+
+    def _save_weights(self) -> None:
+        """Persist current weights to disk."""
+        try:
+            path = self._weights_path()
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(self._weights, fh, indent=2)
+        except Exception:
+            # Silent failure is acceptable; this is a heuristic aid.
+            pass
+
+    def _get_weights(self) -> dict:
+        """
+        Lazy-init accessor so we do not need to modify __init__.
+        """
+        if not hasattr(self, "_weights") or self._weights is None:
+            self._weights = self._load_weights()
+        return self._weights
+
+    def _init_weights_for_category(
+        self, cat: str, candidates: list[str]
+    ) -> None:
+        """
+        Ensure raw weights exist for all 'candidates' in category 'cat'.
+        Unseen keys start at 1.0 so that a fresh pool is uniform when normalized.
+        """
+        w = self._get_weights()[cat]
+        for key in candidates:
+            if key not in w:
+                w[key] = 1.0
+
+    def _normalize_probs(self, cat: str, pool: list[str]) -> list[float]:
+        """
+        Build a probability vector over 'pool' from raw weights in category 'cat'.
+        If every weight is zero or missing, fallback to uniform.
+        """
+        w = self._get_weights()[cat]
+        vals = [float(w.get(k, 1.0)) for k in pool]
+        s = sum(vals)
+        if s <= 0.0 or not all(v >= 0.0 for v in vals):
+            n = max(1, len(pool))
+            return [1.0 / n] * len(pool)
+        return [v / s for v in vals]
+
+    def _choose_weighted(self, cat: str, pool: list[str]) -> str:
+        """
+        Draw one key from 'pool' according to normalized weights in category 'cat'.
+        """
+        import random as _rnd
+
+        self._init_weights_for_category(cat, pool)
+        probs = self._normalize_probs(cat, pool)
+        r = _rnd.random()
+        acc = 0.0
+        for key, p in zip(pool, probs):
+            acc += p
+            if r <= acc:
+                return key
+        return pool[-1]  # numerical fallback
+
+    def _adjust_weight(
+        self, cat: str, selected: str, delta: float, pool: list[str]
+    ) -> None:
+        """
+        Gently adjust probabilities for one category within 'pool', then renormalize.
+
+        Strategy (slow + stable):
+          - Work on positive raw weights and update the *selected* item
+            multiplicatively, others unchanged (the renormalization naturally
+            shifts the rest the opposite way).
+          - Scale the step by the pool size so large pools evolve very slowly.
+          - After normalization, blend a tiny fraction back toward uniform to
+            avoid runaway concentration and keep exploration alive.
+
+        :param cat: weight category key ("dep_airports", "dest_airports", "dates")
+        :param selected: the chosen key inside 'pool' to up/down weight
+        :param delta: signed update signal in [-1.0, 1.0] (from caller)
+                      positive => reward; negative => penalty
+        :param pool: the list of keys available for this draw
+        """
+        if len(pool) <= 1 or selected not in pool:
+            return
+
+        # Ensure weights exist and are positive
+        wcat = self._get_weights()[cat]
+        self._init_weights_for_category(cat, pool)
+
+        # Base step sizes (intentionally small; scaled by pool size below)
+        BASE_GOOD = 0.25  # multiplicative step numerator for reward
+        BASE_BAD = 0.35  # multiplicative step numerator for penalty (larger)
+        # Tiny smoothing toward uniform each update
+        SMOOTH_BACK = 0.01
+
+        n = len(pool)
+        eps = 1e-6
+
+        # Current raw weights and probabilities
+        raw = [float(wcat.get(k, 1.0)) for k in pool]
+        s = sum(raw)
+        if s <= 0.0:
+            raw = [1.0] * n
+            s = float(n)
+        probs = [r / s for r in raw]
+
+        i_sel = pool.index(selected)
+        p_sel = probs[i_sel]
+
+        # Compute a very small multiplicative factor for the selected key.
+        # Scale by pool size so larger pools evolve slower.
+        if delta > 0.0:
+            step = (BASE_GOOD / n) * min(1.0, delta)
+            mult = 1.0 + step
+        elif delta < 0.0:
+            step = (BASE_BAD / n) * min(1.0, abs(delta))
+            mult = max(0.0, 1.0 - step)
+        else:
+            mult = 1.0
+
+        # Apply multiplicative change to the selected item's *raw* weight
+        raw[i_sel] = max(eps, raw[i_sel] * mult)
+
+        # Renormalize to probabilities
+        s2 = sum(raw)
+        probs2 = [r / s2 for r in raw]
+
+        # Smooth slightly toward uniform to prevent runaway concentration
+        uniform = 1.0 / n
+        probs3 = [
+            (1.0 - SMOOTH_BACK) * p + SMOOTH_BACK * uniform for p in probs2
+        ]
+
+        # Final normalization (guards against numeric drift)
+        s3 = sum(probs3)
+        if s3 <= 0.0:
+            probs3 = [uniform] * n
+        else:
+            probs3 = [max(eps, p / s3) for p in probs3]
+
+        # Write back as raw weights (we store probabilities; they will be re-normalized on use)
+        for key, p in zip(pool, probs3):
+            wcat[key] = p
+
+        self._save_weights()
+
+    def _ensure_date_weights(self, date_keys: list[str]) -> None:
+        """
+        Ensure raw weights exist for all 'date_keys' under category 'dates'.
+        """
+        self._init_weights_for_category("dates", date_keys)
+
+    def _update_adaptive_after_result(
+        self,
+        dep_key: str,
+        dest_key: str,
+        date_key: str,
+        deps_pool: list[str],
+        dests_pool: list[str],
+        dates_pool: list[str],
+        result_price: float | None,
+        prev_best_price: float | None,
+    ) -> None:
+        """
+        Apply very small, pool-size-scaled updates to the three probability families.
+
+        Signals:
+          - No result: mild penalty.
+          - Good (within +2% of prev best): small reward scaled by closeness.
+          - Clearly worse (>= +50% vs prev best): small penalty.
+
+        Everything is intentionally slow so we keep exploring for a long time.
+        """
+        # Default: tiny penalty when nothing matched constraints
+        if result_price is None:
+            signal = -1.0
+            for cat, key, pool in (
+                ("dep_airports", dep_key, deps_pool),
+                ("dest_airports", dest_key, dests_pool),
+                ("dates", date_key, dates_pool),
+            ):
+                self._adjust_weight(cat, key, signal, pool)
+            return
+
+        # If we do not have a baseline yet, do not update.
+        if prev_best_price is None or prev_best_price <= 0:
+            return
+
+        ratio = float(result_price) / float(prev_best_price)
+
+        # Thresholds tuned for slow updates
+        NEAR_THRESH = 1.02  # within +2% of prev best is "good"
+        WORSE_THRESH = 1.50  # >= +50% worse is "bad"
+
+        if ratio <= NEAR_THRESH:
+            # Scale reward by how close we are (1.0 exactly best, 0.0 at threshold)
+            closeness = max(
+                0.0,
+                min(1.0, (NEAR_THRESH - ratio) / (NEAR_THRESH - 1.0 + 1e-9)),
+            )
+            signal = 0.25 + 0.75 * closeness  # in [0.25, 1.0]
+        elif ratio >= WORSE_THRESH:
+            # Fixed mild penalty
+            signal = -1.0
+        else:
+            # Neutral zone: no update
+            return
+
+        for cat, key, pool in (
+            ("dep_airports", dep_key, deps_pool),
+            ("dest_airports", dest_key, dests_pool),
+            ("dates", date_key, dates_pool),
+        ):
+            self._adjust_weight(cat, key, signal, pool)
 
 
 if __name__ == "__main__":
