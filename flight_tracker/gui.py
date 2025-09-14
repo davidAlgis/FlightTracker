@@ -145,9 +145,14 @@ class FlightBotGUI(tk.Tk):
             widget.bind("<KeyRelease>", lambda ev: self._on_fields_changed())
             self.entries[name] = widget
 
-        tk.Button(frame, text="Start Monitoring", command=self._on_start).grid(
+        # store a reference to enable/disable while monitoring
+        self.start_button = tk.Button(
+            frame, text="Start Monitoring", command=self._on_start
+        )
+        self.start_button.grid(
             row=len(fields), column=0, columnspan=2, pady=10
         )
+
         self.config_frame = frame
 
     def _create_result_frame(self) -> None:
@@ -158,7 +163,7 @@ class FlightBotGUI(tk.Tk):
         frame.rowconfigure(1, weight=1)  # figure
         frame.columnconfigure(0, weight=1)
 
-        # historic best
+        # ── historic best ───────────────────────────────────────────────────────
         hbf = tk.LabelFrame(frame, text="Historic Best Flight")
         hbf.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 2))
         self.historic_text = tk.Text(
@@ -166,7 +171,7 @@ class FlightBotGUI(tk.Tk):
         )
         self.historic_text.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # interactive graph
+        # ── interactive graph ───────────────────────────────────────────────────
         gf = tk.LabelFrame(frame, text="Price History")
         gf.grid(row=1, column=0, sticky="nsew", padx=5, pady=(2, 5))
         gf.rowconfigure(0, weight=1)
@@ -218,10 +223,21 @@ class FlightBotGUI(tk.Tk):
         self.progress = ttk.Progressbar(sp, mode="indeterminate")
         self.progress.grid(row=1, column=0, padx=5, pady=(0, 5), sticky="ew")
 
+        # NEW: Cancel button to stop current monitoring
+        self.cancel_button = tk.Button(
+            sp,
+            text="Cancel Monitoring",
+            command=self._on_cancel,
+            state="disabled",
+        )
+        self.cancel_button.grid(
+            row=2, column=0, padx=5, pady=(0, 8), sticky="e"
+        )
+
         self.status_panel = sp
 
     def _load_airport_names(self):
-        """Load IATA->airport-name map from OurAirports CSV."""
+        """Load IATA→airport-name map from OurAirports CSV."""
         df = pd.read_csv(AirportFromDistance.AIRPORTS_URL)
         self.code_to_name = {
             c: n for c, n in zip(df["iata_code"], df["name"]) if pd.notna(c)
@@ -279,12 +295,14 @@ class FlightBotGUI(tk.Tk):
             self._stop_event.set()
             self.progress.stop()
             self.status_label.config(text="Status: idle")
+            self.cancel_button.config(state="disabled")
+            self._wait_for_cancel()
             messagebox.showinfo(
                 "FlightBot", "Monitoring stopped (fields changed)."
             )
 
     def _pre_resolve_airports(self, field):
-        """Resolve freeform airport input into IATA codes and display CODE - Name."""
+        """Resolve freeform airport input into IATA codes and display CODE – Name."""
         w = self.entries[field]
         raw = self._get_widget_value(w)
         if not raw:
@@ -343,9 +361,35 @@ class FlightBotGUI(tk.Tk):
         if self._monitor_thread and self._monitor_thread.is_alive():
             return
         self._stop_event.clear()
-        self.status_label.config(text="Status: starting...")
+        self.status_label.config(text="Status: starting…")
         self.progress.start()
+        # disable Start while running, enable Cancel
+        self.start_button.config(state="disabled")
+        self.cancel_button.config(state="normal")
         self._start_monitoring()
+
+    def _on_cancel(self):
+        """Request cancellation of the current monitoring loop."""
+        if not self._monitor_thread or not self._monitor_thread.is_alive():
+            return
+        self._stop_event.set()
+        self.progress.stop()
+        self.status_label.config(text="Status: cancelling…")
+        # avoid double-clicks
+        self.cancel_button.config(state="disabled")
+        # poll until thread finishes, then restore controls
+        self._wait_for_cancel()
+
+    def _wait_for_cancel(self):
+        """Poll for monitor thread completion and restore UI when done."""
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self.after(500, self._wait_for_cancel)
+            return
+        # thread finished
+        self._monitor_thread = None
+        self.status_label.config(text="Status: idle")
+        self.start_button.config(state="normal")
+        self.cancel_button.config(state="disabled")
 
     def _start_monitoring(self):
         """Gather parameters, save config, and launch the monitor loop."""
@@ -374,6 +418,8 @@ class FlightBotGUI(tk.Tk):
                 )
                 self.progress.stop()
                 self.status_label.config(text="Status: idle")
+                self.start_button.config(state="normal")
+                self.cancel_button.config(state="disabled")
                 return
 
             # blocking validation: window must be >= max duration
@@ -387,6 +433,8 @@ class FlightBotGUI(tk.Tk):
                 )
                 self.progress.stop()
                 self.status_label.config(text="Status: idle")
+                self.start_button.config(state="normal")
+                self.cancel_button.config(state="disabled")
                 return
 
         params = {
@@ -533,7 +581,6 @@ class FlightBotGUI(tk.Tk):
                             threaded=True,
                         )
 
-                    # optional: track best per pair in this session (used by filtering in exhaustive mode)
                     best_for_pair = self.best_prices.get((dep, dest))
                     if best_for_pair is None or price < best_for_pair:
                         self.best_prices[(dep, dest)] = price
@@ -628,7 +675,7 @@ class FlightBotGUI(tk.Tk):
 
     def _filter_airports(self):
         """
-        Remove airports whose all pair prices are >=20% above overall best,
+        Remove airports whose all pair prices are ≥20% above overall best,
         except those that ever appeared in a daily-best record.
         Save updated codes and display text back to config.
         """
@@ -709,10 +756,10 @@ class FlightBotGUI(tk.Tk):
     # ------------------------------------------------------------------ #
     def _load_historic_best(self) -> None:
         """
-        Read flight_records.jsonl and show the single cheapest record ever
+        Read *flight_records.jsonl* and show the single cheapest record ever
         found.
-        Works with both legacy daily records (key date) and the new
-        hourly records (key datetime, format YYYY-MM-DD-HH).
+        Works with both legacy daily records (key **date**) and the new
+        hourly records (key **datetime**, format *YYYY-MM-DD-HH*).
         """
         if not os.path.exists(self.record_mgr.path):
             return
@@ -725,6 +772,7 @@ class FlightBotGUI(tk.Tk):
                 except json.JSONDecodeError:
                     continue
 
+                # support both schemas ----------------------------------------------------------------
                 ts_key = "datetime" if "datetime" in rec else "date"
                 if ts_key not in rec or "price" not in rec:
                     continue
@@ -733,6 +781,7 @@ class FlightBotGUI(tk.Tk):
                     price_val = float(rec["price"])
                 except (TypeError, ValueError):
                     continue
+                # -------------------------------------------------------------------------------------
 
                 if best is None or price_val < best["price"]:
                     best = {
@@ -748,8 +797,8 @@ class FlightBotGUI(tk.Tk):
         if best is None:
             return
 
-        # display
-        date_display = best["ts"]
+        # display ----------------------------------------------------------------
+        date_display = best["ts"]  # keep full YYYY-MM-DD(-HH) string
         text = (
             f"Date/Hour: {date_display}\n"
             f"Route: {best['departure']} \u2192 {best['destination']}\n"
@@ -768,8 +817,8 @@ class FlightBotGUI(tk.Tk):
         """
         Plot all stored prices versus their timestamp.
 
-        - Supports both legacy "date" (daily) and new "datetime" (hourly) keys
-        - Each point is "pickable" so a left-click displays an annotated tooltip
+        • Supports both legacy “date” (daily) and new “datetime” (hourly) keys
+        • Each point is “pickable” so a left-click displays an annotated tooltip
         """
         if not os.path.exists(self.record_mgr.path):
             return
@@ -806,7 +855,7 @@ class FlightBotGUI(tk.Tk):
             return
 
         self.ax.clear()
-        # picker=5 -> 5-pt tolerance for easier clicking
+        # picker=5 → 5-pt tolerance for easier clicking
         self.ax.plot_date(times, prices, "-o", picker=5)
 
         self.ax.set_xlabel("Monitoring timestamp")
@@ -871,13 +920,13 @@ class FlightBotGUI(tk.Tk):
         self.destroy()
 
     def _create_tray_icon(self):
-        """Create a tray icon using the project assets or a fallback."""
+        """Create a tray icon using the project’s ICO asset or a fallback."""
         icon_path = self._asset_path("flight_tracker.ico")
 
         if os.path.exists(icon_path):
             img = Image.open(icon_path)
         else:
-            # 16x16 white square with a black border as a minimalist fallback
+            # 16×16 white square with a black border as a minimalist fallback
             img = Image.new("RGB", (16, 16), "white")
             d = ImageDraw.Draw(img)
             d.rectangle((2, 2, 13, 13), fill="black")
@@ -895,13 +944,13 @@ class FlightBotGUI(tk.Tk):
     # ------------------------------------------------------------------ #
     def _asset_path(self, *parts: str) -> str:
         """
-        Return an absolute path inside the assets/ folder that works both
-        in development (ordinary Python interpreter) and
-        in a frozen application built with cx_Freeze.
+        Return an absolute path inside the *assets/* folder that works both
+        • in development (ordinary Python interpreter) and
+        • in a frozen application built with cx_Freeze.
 
-        When frozen, sys.frozen is True and sys.executable points to
-        the bundled executable directory, which already contains the copied
-        assets/ folder.
+        When frozen, ``sys.frozen`` is True and ``sys.executable`` points to
+        the bundled executable’s directory, which already contains the copied
+        *assets/* folder.
         """
         import sys
 
