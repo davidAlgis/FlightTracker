@@ -155,16 +155,20 @@ class FlightBot:
     # ------------------------------------------------------------------ #
     def _get_current_price(self) -> dict:
         """
-        Scrape each result's price, airline, and durations;
-        filter out any exceeding max_duration_flight, print each,
-        and return the cheapest as a dict with route dates.
+        Scrape each result's price, airline, and durations; return the cheapest dict.
 
-        Cancellation:
-        - driver.get is bounded by a short page-load timeout.
-        - cancel from another thread quits the driver immediately.
+        Offline-safe:
+        - If a network/navigation error occurs (e.g., DNS not found), mark the run
+          as offline and return None without raising.
         """
+        from selenium.common.exceptions import (TimeoutException,
+                                                WebDriverException)
+
         options = Options()
         options.add_argument("--headless")
+
+        # Reset offline flag for this call
+        self._offline = False
 
         try:
             self._driver = (
@@ -175,8 +179,9 @@ class FlightBot:
                 else webdriver.Firefox(options=options)
             )
         except WebDriverException:
-            # If driver cannot start, treat as no result
+            # Driver could not start (rare); treat as offline-ish failure
             self._driver = None
+            self._offline = True
             return None  # type: ignore
 
         html = ""
@@ -185,33 +190,29 @@ class FlightBot:
                 self._quit_driver()
                 return None  # type: ignore
 
-            # Keep page load short; we can still read partial DOM after stopping.
             try:
                 if self._driver is not None:
                     self._driver.set_page_load_timeout(8)
                     self._driver.set_script_timeout(8)
                     self._driver.get(self.url)
             except TimeoutException:
-                # Stop loading and use whatever is available.
                 try:
                     if self._driver is not None:
                         self._driver.execute_script("window.stop();")
                 except Exception:
                     pass
             except WebDriverException:
-                # Driver likely closed due to cancel
-                if self._is_cancelled():
-                    return None  # type: ignore
-                raise
+                # E.g., about:neterror dnsNotFound when offline
+                self._offline = True
+                self._quit_driver()
+                return None  # type: ignore
 
-            # Short, cancellable cookie dismissal
             self._dismiss_cookies_if_present()
             if self._is_cancelled():
                 self._quit_driver()
                 return None  # type: ignore
 
-            # Instead of sleeping 30s, poll briefly for content, cancellable
-            # Try up to ~8s total.
+            # Poll briefly for content (cancellable)
             for _ in range(32):
                 if self._is_cancelled():
                     self._quit_driver()
@@ -226,13 +227,12 @@ class FlightBot:
                 time.sleep(0.25)
 
         finally:
-            # Ensure immediate shutdown if cancelled or after capture
             self._quit_driver()
 
         if self._is_cancelled():
             return None  # type: ignore
-
         if not html:
+            # No DOM fetched; if we did not explicitly mark offline, just no result
             return None  # type: ignore
 
         soup = BeautifulSoup(html, "html.parser")
@@ -280,9 +280,6 @@ class FlightBot:
             ):
                 continue
 
-            print(
-                f"  Flight ({company}): EUR {price_eur}, Out: {outs}, Ret: {ret}"
-            )
             candidates.append(
                 {
                     "company": company,
@@ -306,13 +303,14 @@ class FlightBot:
         )
         return best
 
-    def start(self, cancel_event=None) -> dict:
+    def start(self) -> dict:
         """
         Run one check and return the best flight dict.
-        If cancel_event is provided, it overrides the instance one.
+
+        Never raises on offline; sets self._offline True and returns None.
         """
-        if cancel_event is not None:
-            self.cancel_event = cancel_event
+        # Clear offline flag for this run
+        self._offline = False
 
         print(
             f"Checking best price for {self.departure}->{self.destination} "
@@ -321,10 +319,23 @@ class FlightBot:
         if self._is_cancelled():
             return None  # type: ignore
 
-        rec = self._get_current_price()
+        try:
+            rec = self._get_current_price()
+        except Exception:
+            # Any unexpected scraper error: be conservative and treat as no result
+            self._offline = False
+            return None  # type: ignore
+
         if not rec:
-            print("  No valid flights under max duration or cancelled.")
+            if getattr(self, "_offline", False):
+                print("  Offline: will retry later.")
+            else:
+                print("  No valid flights under max duration or cancelled.")
             return None  # type: ignore
 
         print(f"  Best price: EUR {rec['price']:.2f}")
         return rec
+
+    def was_offline(self) -> bool:
+        """Return True if the last start() detected a network/offline error."""
+        return bool(getattr(self, "_offline", False))

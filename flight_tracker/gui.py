@@ -226,11 +226,71 @@ class FlightBotGUI(tk.Tk):
         self.status_panel = sp
 
     def _load_airport_names(self):
-        """Load IATA->airport-name map from OurAirports CSV."""
-        df = pd.read_csv(AirportFromDistance.AIRPORTS_URL)
+        """
+        Load IATA->airport-name map from OurAirports CSV.
+
+        If the download fails (e.g., no internet), do not crash:
+        - keep an empty map so the GUI stays usable,
+        - update the status label softly,
+        - schedule a retry in 60 seconds via Tkinter after().
+        Any pending retry is canceled once loading succeeds.
+        """
+        import urllib.error
+
+        retry_ms = 60_000  # 1 minute
+
+        try:
+            df = pd.read_csv(AirportFromDistance.AIRPORTS_URL)
+        except Exception:
+            # Ensure the map exists, even if empty
+            if not hasattr(self, "code_to_name") or self.code_to_name is None:
+                self.code_to_name = {}
+
+            # Soft status hint; ignore if status_label not ready yet
+            try:
+                self.status_label.config(
+                    text="Status: offline, retrying in 1 min"
+                )
+            except Exception:
+                pass
+
+            # Schedule a single retry if none is pending
+            def _retry():
+                self._airport_retry_id = None
+                self._load_airport_names()
+
+            if (
+                not hasattr(self, "_airport_retry_id")
+                or self._airport_retry_id is None
+            ):
+                try:
+                    self._airport_retry_id = self.after(retry_ms, _retry)
+                except Exception:
+                    # If after() is not available yet, try again on next call path
+                    self._airport_retry_id = None
+            return
+
+        # Success path: build the code->name map
         self.code_to_name = {
             c: n for c, n in zip(df["iata_code"], df["name"]) if pd.notna(c)
         }
+
+        # Cancel any pending retry now that data is loaded
+        if (
+            hasattr(self, "_airport_retry_id")
+            and self._airport_retry_id is not None
+        ):
+            try:
+                self.after_cancel(self._airport_retry_id)
+            except Exception:
+                pass
+            self._airport_retry_id = None
+
+        # Optional: refresh status
+        try:
+            self.status_label.config(text="Status: data loaded")
+        except Exception:
+            pass
 
     def _load_saved_config(self):
         """Restore last inputs and resolved codes from config.json."""
@@ -518,23 +578,14 @@ class FlightBotGUI(tk.Tk):
 
     def _monitor_loop(self, deps, dests, pairs, params):
         """
-        Continuous monitoring.
+        Continuous monitoring with quiet offline handling.
 
-        Random mode:
-          - Draw departure airport, destination airport, and departure date
-            from adaptive probability distributions (persisted across runs).
-          - Duration remains uniformly sampled from user-provided durations.
-          - After each attempt, gently update probabilities based on result quality.
-
-        Exhaustive mode:
-          - Unchanged behavior (weights are not used outside random sampling).
-
-        We still record results hourly and show notifications, and cancellation remains immediate.
+        When a scrape detects offline (network/DNS error), pause for 60 seconds and
+        retry, without crashing the thread.
         """
         from datetime import datetime
 
-        # Ensure weights are loaded once the worker starts
-        _ = self._get_weights()
+        _ = self._get_weights()  # ensure weights loaded (no-op if already)
 
         random_mode = bool(params.get("random_mode"))
         window_start = params.get("window_start")
@@ -542,13 +593,14 @@ class FlightBotGUI(tk.Tk):
         durations = params.get("durations") or []
         samples_per_sweep = 10 if random_mode else 0
 
+        OFFLINE_WAIT_SEC = 60
+
         try:
             while not self._stop_event.is_set():
                 self.status_label.config(text="Status: checking flights...")
                 self.progress.start()
 
                 if random_mode:
-                    # Initialize airport pools in the weights tables
                     deps_pool = list(deps)
                     dests_pool = list(dests)
                     self._init_weights_for_category("dep_airports", deps_pool)
@@ -562,13 +614,9 @@ class FlightBotGUI(tk.Tk):
                         if not deps_pool or not dests_pool or not durations:
                             continue
 
-                        # 1) Duration is sampled uniformly (requirement only mentions 3 weighted elements)
                         dur_days = int(random.choice(durations))
-
-                        # 2) Build the valid departure-date pool for this duration and ensure weights
                         latest_dep = window_end - timedelta(days=dur_days)
                         if latest_dep < window_start:
-                            # No valid departure for this duration in this window
                             continue
                         num_days = (latest_dep - window_start).days + 1
                         dates_pool = [
@@ -579,7 +627,6 @@ class FlightBotGUI(tk.Tk):
                         ]
                         self._ensure_date_weights(dates_pool)
 
-                        # 3) Draw departure airport, destination airport, and date using adaptive weights
                         dep = self._choose_weighted("dep_airports", deps_pool)
                         dest = self._choose_weighted(
                             "dest_airports", dests_pool
@@ -590,7 +637,6 @@ class FlightBotGUI(tk.Tk):
                         dd = dep_dt.strftime("%Y-%m-%d")
                         rd = ret_dt.strftime("%Y-%m-%d")
 
-                        # 4) Run the check
                         self.status_label.config(
                             text=f"Checking {dep}->{dest} on {dd} -> {rd}"
                         )
@@ -606,13 +652,26 @@ class FlightBotGUI(tk.Tk):
 
                         prev_best = self._get_global_best_price()
                         rec = bot.start()
+                        is_offline = bool(getattr(bot, "_offline", False))
                         self._current_bot = None
                         if self._stop_event.is_set():
                             break
 
-                        # 5) Update weights based on result quality (or failure)
+                        if is_offline:
+                            # Quiet offline backoff: wait 60s, allow cancel, then continue
+                            try:
+                                self.status_label.config(
+                                    text="Status: offline, retrying in 60s"
+                                )
+                            except Exception:
+                                pass
+                            for _s in range(OFFLINE_WAIT_SEC):
+                                if self._stop_event.is_set():
+                                    break
+                                time.sleep(1)
+                            break  # break inner sample loop; outer while will try again
                         if not rec:
-                            # No flight matched constraints
+                            # No flight matched constraints; adapt weights slowly
                             self._update_adaptive_after_result(
                                 dep,
                                 dest,
@@ -626,8 +685,6 @@ class FlightBotGUI(tk.Tk):
                             continue
 
                         price = rec["price"]
-
-                        # Save the record (with dates)
                         timestamp = datetime.now().strftime("%Y-%m-%d-%H")
                         self.record_mgr.save_record(
                             timestamp,
@@ -641,7 +698,6 @@ class FlightBotGUI(tk.Tk):
                             rec.get("arrival_date"),
                         )
 
-                        # Adaptive update vs. previous best (before saving)
                         self._update_adaptive_after_result(
                             dep,
                             dest,
@@ -653,7 +709,6 @@ class FlightBotGUI(tk.Tk):
                             prev_best_price=prev_best,
                         )
 
-                        # Notifications and visuals
                         global_prev = self._get_global_best_price()
                         if global_prev is None or price < global_prev:
                             self.notifier.show_toast(
@@ -685,7 +740,6 @@ class FlightBotGUI(tk.Tk):
                         self._plot_history()
 
                 else:
-                    # Exhaustive over all airport pairs for the single (dep, ret) pair
                     dep_ret_pairs = pairs or []
                     for dep, dest in itertools.product(deps, dests):
                         best_for_pair = None
@@ -708,9 +762,23 @@ class FlightBotGUI(tk.Tk):
                             self._current_bot = bot
                             prev_best = self._get_global_best_price()
                             rec = bot.start()
+                            is_offline = bool(getattr(bot, "_offline", False))
                             self._current_bot = None
                             if self._stop_event.is_set():
                                 break
+
+                            if is_offline:
+                                try:
+                                    self.status_label.config(
+                                        text="Status: offline, retrying in 60s"
+                                    )
+                                except Exception:
+                                    pass
+                                for _s in range(OFFLINE_WAIT_SEC):
+                                    if self._stop_event.is_set():
+                                        break
+                                    time.sleep(1)
+                                break  # break inner date loop; outer while will retry
                             if not rec:
                                 continue
 
@@ -764,8 +832,6 @@ class FlightBotGUI(tk.Tk):
                         if self._stop_event.is_set():
                             break
 
-                # No idle waiting here (continuous). If you want a tiny breather to keep CPU low,
-                # you could add a very small sleep guarded by the cancel flag.
                 self.progress.stop()
                 self.status_label.config(text="Status: continuing...")
 
@@ -1039,7 +1105,7 @@ class FlightBotGUI(tk.Tk):
             xy=(0, 0),
             xytext=(10, 10),
             textcoords="offset points",
-            bbox=dict(boxstyle="round", fc="yellow", ec="black", lw=0.5),
+            bbox=dict(boxstyle="round", fc="white", ec="black", lw=0.5),
             arrowprops=dict(arrowstyle="->"),
             visible=False,
             zorder=10,
