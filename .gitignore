@@ -7,3 +7,4 @@ flight_records.jsonl
 env/
 build/
 *.spec
+weights.json
