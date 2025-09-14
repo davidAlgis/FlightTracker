@@ -72,11 +72,14 @@ def install_requirements(pip_bin: Path) -> None:
         subprocess.check_call([pip_bin, "install", *deps])
 
 
-# --------------------------------------------------------------------------- #
-# cx_Freeze build
-# --------------------------------------------------------------------------- #
 def build_with_cx_freeze(py_bin: Path, pip_bin: Path) -> None:
-    """Write a tiny helper setup script for cx_Freeze and run it."""
+    """
+    Freeze the app with cx_Freeze, bundling only what we need.
+
+    - include_msvcr=True bundles the VC runtime (quieting common CRT warnings).
+    - excludes trims optional/test backends and heavy libs we do not use.
+    - explicitly include TkAgg backend and mpl-data so Matplotlib works.
+    """
     subprocess.check_call([pip_bin, "install", "cx_Freeze~=7.1"])
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -96,11 +99,77 @@ sys.path.insert(0, str(ROOT))
 ASSETS    = ROOT / "assets"
 BUILD_DIR = ROOT / "build"
 
+# Try to locate matplotlib data files (safe no-op if not present).
+try:
+    import matplotlib
+    from matplotlib import get_data_path as _mpl_data_path
+    MPL_DATA = _mpl_data_path()
+    mpl_files = [(MPL_DATA, "mpl-data")]
+except Exception:
+    mpl_files = []
+
 build_exe_options = {{
-    "packages": ["flight_tracker"],                   # collect the package
-    "excludes": [],
-    "include_files": [(ASSETS, "assets")],            # copy assets/ beside exe
-    "build_exe": BUILD_DIR,                           # output directory
+    "packages": [
+        "flight_tracker",
+        "tkinter",
+        "matplotlib",
+        "matplotlib.backends.backend_tkagg",
+        "matplotlib.backends.backend_agg",
+        "numpy",
+        "pandas",
+        "bs4",
+        "selenium",
+        "pystray",
+        "PIL",
+        "win10toast",
+    ],
+    "excludes": [
+        # Matplotlib optional backends/tests
+        "matplotlib.tests",
+        "matplotlib.testing",
+        "matplotlib.sphinxext",
+        "matplotlib.backends.backend_qt5",
+        "matplotlib.backends.backend_qt5agg",
+        "matplotlib.backends.backend_qt6",
+        "matplotlib.backends.backend_qtagg",
+        "matplotlib.backends.backend_wx",
+        "matplotlib.backends.backend_gtk3",
+        "matplotlib.backends.backend_nbagg",
+        "matplotlib.backends.backend_webagg",
+        # Big/unused ecosystems
+        "numpy.testing",
+        "pandas.tests",
+        "pytest",
+        "sphinx",
+        "sphinx_gallery",
+        "IPython",
+        "jupyter",
+        "notebook",
+        "PyQt5",
+        "PyQt6",
+        "PySide2",
+        "PySide6",
+        "wx",
+        "scipy",
+        "pyarrow",
+        "tables",
+        # Pandas optional excel engines we do not use
+        "openpyxl",
+        "xlrd",
+        "xlsxwriter",
+        "odf",
+        "pyxlsb",
+        "python_calamine",
+        "qtpy",
+        # Misc test suites
+        "tkinter.test",
+        "distutils.tests",
+        "setuptools._distutils.tests",
+    ],
+    "include_files": [(ASSETS, "assets"), *mpl_files],
+    "include_msvcr": True,   # bundle VC runtime on Windows
+    "optimize": 1,
+    "build_exe": BUILD_DIR,
 }}
 
 base = "Win32GUI" if os.name == "nt" else None
@@ -121,7 +190,6 @@ setup(
 )
 """
         )
-
         subprocess.check_call([py_bin, str(freeze_setup), "build"])
 
 
