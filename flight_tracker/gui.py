@@ -385,24 +385,59 @@ class FlightBotGUI(tk.Tk):
         self.cancel_button.config(state="disabled")
 
     def _start_monitoring(self):
-        """Gather parameters, save config, and launch the monitor loop."""
+        """
+        Gather parameters, validate dates, save config, and launch the monitor loop.
+
+        This version validates the Departure Date and Return Date with clear,
+        user-visible errors instead of letting ValueError bubble up into Tkinter.
+        On validation failure, it restores the UI state and returns immediately.
+        """
         deps = self.resolved_airports.get("departure", [])
         dests = self.resolved_airports.get("destination", [])
 
-        dep_dt = self._parse_date_single(
-            self._get_widget_value(self.entries["dep_date"])
-        )
+        # Validate departure date
+        try:
+            dep_dt = self._parse_date_single(
+                self._get_widget_value(self.entries["dep_date"])
+            )
+        except ValueError as e:
+            messagebox.showerror("Invalid Departure Date", str(e))
+            self.progress.stop()
+            self.status_label.config(text="Status: idle")
+            self.start_button.config(state="normal")
+            self.cancel_button.config(state="disabled")
+            return
+
+        # Validate return date only if provided
         arr_field_val = self._get_widget_value(self.entries["arrival_date"])
         arr_dt = None
         if arr_field_val:
-            arr_dt = self._parse_date_single(arr_field_val)
+            try:
+                arr_dt = self._parse_date_single(arr_field_val)
+            except ValueError as e:
+                messagebox.showerror("Invalid Return Date", str(e))
+                self.progress.stop()
+                self.status_label.config(text="Status: idle")
+                self.start_button.config(state="normal")
+                self.cancel_button.config(state="disabled")
+                return
 
         trip_str = self._get_widget_value(self.entries["trip_duration"])
         random_mode = bool(trip_str)
 
         durations = None
         if random_mode:
-            durations = self._parse_durations(trip_str)
+            # Trip duration is provided: parse and validate the date window length
+            try:
+                durations = self._parse_durations(trip_str)
+            except ValueError as e:
+                messagebox.showerror("Invalid Trip Duration", str(e))
+                self.progress.stop()
+                self.status_label.config(text="Status: idle")
+                self.start_button.config(state="normal")
+                self.cancel_button.config(state="disabled")
+                return
+
             if arr_dt is None:
                 messagebox.showerror(
                     "Invalid input",
@@ -413,13 +448,16 @@ class FlightBotGUI(tk.Tk):
                 self.start_button.config(state="normal")
                 self.cancel_button.config(state="disabled")
                 return
+
             window_days = (arr_dt - dep_dt).days
             max_trip = max(durations)
             if window_days < max_trip:
                 messagebox.showerror(
                     "Invalid window",
-                    f"Date window is too short for the maximum trip duration "
-                    f"({window_days} days window < {max_trip} days).",
+                    (
+                        "Date window is too short for the maximum trip duration "
+                        f"({window_days} days window < {max_trip} days)."
+                    ),
                 )
                 self.progress.stop()
                 self.status_label.config(text="Status: idle")
@@ -437,22 +475,23 @@ class FlightBotGUI(tk.Tk):
             "durations": durations,
         }
 
+        # Save config (store entered strings and resolved codes)
         cfg = {k: self._get_widget_value(w) for k, w in self.entries.items()}
         cfg["departure_codes"] = deps
         cfg["destination_codes"] = dests
         cfg["max_duration_flight"] = params["max_duration_flight"]
         self.config_mgr.save(cfg)
 
-        pairs = (
-            None
-            if random_mode
-            else [
+        # Exhaustive mode keeps the single pair; random mode uses None sentinel
+        if random_mode:
+            pairs = None
+        else:
+            pairs = [
                 (
                     dep_dt.strftime("%Y-%m-%d"),
                     (arr_dt or dep_dt).strftime("%Y-%m-%d"),
                 )
             ]
-        )
 
         self._monitor_thread = threading.Thread(
             target=self._monitor_loop,
@@ -852,12 +891,25 @@ class FlightBotGUI(tk.Tk):
             self.canvas.draw_idle()
 
     def _parse_date_single(self, s: str) -> datetime:
-        """Parse 'YYYY-MM-DD' into a datetime (single date only)."""
+        """
+        Parse a single date in 'YYYY-MM-DD' format into a datetime.
+
+        Raises:
+            ValueError: with a precise message if the string does not match the
+            expected format or if it is not a real calendar date (e.g., day out
+            of range for the given month).
+        """
         s = s.strip()
+
+        # First validate the format explicitly.
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+            raise ValueError(f"'{s}' does not match YYYY-MM-DD.")
+
         try:
             return datetime.strptime(s, "%Y-%m-%d")
         except ValueError as e:
-            raise ValueError("Invalid date format, expected YYYY-MM-DD") from e
+            # Preserve the underlying reason (e.g., "day is out of range for month").
+            raise ValueError(f"'{s}' is not a valid calendar date: {e}") from e
 
     def _parse_durations(self, s):
         """Parse 'N' or 'N-M' into a list of integer durations."""
