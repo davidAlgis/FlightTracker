@@ -76,12 +76,16 @@ class FlightRecord:
         duration_out: str,
         duration_return: str,
         price: float,
+        dep_date: str | None = None,
+        arrival_date: str | None = None,
     ) -> None:
         """
         Persist a scrape result.
 
-        If an entry already exists for *datetime_key* it is replaced **only
-        if** the new price is lower.
+        If an entry already exists for *datetime_key* it is replaced only if the
+        new price is lower.
+
+        Stores optional dep_date/arrival_date so we can reconstruct a Kayak URL.
         """
         records: list[dict] = []
         existing_price: float | None = None
@@ -98,21 +102,24 @@ class FlightRecord:
                 else:
                     records.append(rec)
 
-        # nothing to do if stored price is already cheaper (or equal)
         if existing_price is not None and existing_price <= price:
             return
 
-        records.append(
-            {
-                "datetime": datetime_key,
-                "departure": departure,
-                "destination": destination,
-                "company": company,
-                "duration_out": duration_out,
-                "duration_return": duration_return,
-                "price": price,
-            }
-        )
+        new_rec = {
+            "datetime": datetime_key,
+            "departure": departure,
+            "destination": destination,
+            "company": company,
+            "duration_out": duration_out,
+            "duration_return": duration_return,
+            "price": price,
+        }
+        if dep_date is not None:
+            new_rec["dep_date"] = dep_date
+        if arrival_date is not None:
+            new_rec["arrival_date"] = arrival_date
+
+        records.append(new_rec)
 
         with open(self.path, "w", encoding="utf-8") as fh:
             for rec in records:

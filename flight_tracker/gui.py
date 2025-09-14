@@ -518,13 +518,10 @@ class FlightBotGUI(tk.Tk):
 
     def _monitor_loop(self, deps, dests, pairs, params):
         """
-        Run continuous monitoring with no idle wait between sweeps.
-
-        Behavior:
-          - Random mode: sample a fixed number of random (date, duration, airport pair) per sweep.
-          - Exhaustive mode: test all airport pairs for the single (dep, ret) pair.
-          - Records results, shows alerts, updates charts, supports immediate cancel.
-          - No sleep at the end of a sweep; the next sweep starts immediately.
+        Check flights either exhaustively for a single (dep,ret) pair
+        or randomly sample (dep date, duration, airport pair) inside the window.
+        Records results (including dep_date/arrival_date), notifies on new lows,
+        then filters airports. Supports instant cancel.
         """
         from datetime import datetime
 
@@ -540,7 +537,6 @@ class FlightBotGUI(tk.Tk):
                 self.progress.start()
 
                 if random_mode:
-                    # Random sampling inside [window_start, window_end]
                     for _ in range(samples_per_sweep):
                         if self._stop_event.is_set():
                             break
@@ -553,7 +549,6 @@ class FlightBotGUI(tk.Tk):
 
                         latest_dep = window_end - timedelta(days=dur_days)
                         if latest_dep < window_start:
-                            # No valid departure for this duration; skip sample
                             continue
 
                         delta_days = (latest_dep - window_start).days
@@ -576,7 +571,7 @@ class FlightBotGUI(tk.Tk):
                             max_duration_flight=params["max_duration_flight"],
                             cancel_event=self._stop_event,
                         )
-                        self._current_bot = bot  # expose for hard cancel
+                        self._current_bot = bot
                         rec = bot.start()
                         self._current_bot = None
                         if self._stop_event.is_set():
@@ -594,6 +589,8 @@ class FlightBotGUI(tk.Tk):
                             rec["duration_out"],
                             rec["duration_return"],
                             price,
+                            rec.get("dep_date"),
+                            rec.get("arrival_date"),
                         )
 
                         global_prev = self._get_global_best_price()
@@ -627,7 +624,6 @@ class FlightBotGUI(tk.Tk):
                         self._plot_history()
 
                 else:
-                    # Exhaustive over all airport pairs for the single (dep, ret) pair
                     dep_ret_pairs = pairs or []
                     for dep, dest in itertools.product(deps, dests):
                         best_for_pair = None
@@ -647,7 +643,7 @@ class FlightBotGUI(tk.Tk):
                                 ],
                                 cancel_event=self._stop_event,
                             )
-                            self._current_bot = bot  # expose for hard cancel
+                            self._current_bot = bot
                             rec = bot.start()
                             self._current_bot = None
                             if self._stop_event.is_set():
@@ -668,6 +664,8 @@ class FlightBotGUI(tk.Tk):
                                 rec["duration_out"],
                                 rec["duration_return"],
                                 price,
+                                rec.get("dep_date"),
+                                rec.get("arrival_date"),
                             )
 
                             global_prev = self._get_global_best_price()
@@ -703,17 +701,10 @@ class FlightBotGUI(tk.Tk):
                         if self._stop_event.is_set():
                             break
 
-                # Filter after the first exhaustive sweep only
-                if self._first_pass and not random_mode:
-                    self._filter_airports()
-                    self._first_pass = False
-
-                # End of sweep: do not idle; immediately proceed to next sweep
                 self.progress.stop()
                 self.status_label.config(text="Status: continuing...")
 
         finally:
-            # Ensure no dangling bot handle
             self._current_bot = None
 
         self.progress.stop()
@@ -795,7 +786,11 @@ class FlightBotGUI(tk.Tk):
 
     # Historic-best panel & history graph
     def _load_historic_best(self) -> None:
-        """Show the single cheapest record ever found (supports legacy schema too)."""
+        """
+        Read flight_records.jsonl and show the single cheapest record ever found.
+        Works with both legacy daily records (key date) and the new hourly records
+        (key datetime). Stores a click-through link when dates are available.
+        """
         if not os.path.exists(self.record_mgr.path):
             return
 
@@ -825,6 +820,9 @@ class FlightBotGUI(tk.Tk):
                         "price": price_val,
                         "duration_out": rec.get("duration_out", ""),
                         "duration_ret": rec.get("duration_return", ""),
+                        # may be absent on older rows
+                        "dep_date": rec.get("dep_date"),
+                        "arrival_date": rec.get("arrival_date"),
                     }
 
         if best is None:
@@ -837,18 +835,73 @@ class FlightBotGUI(tk.Tk):
             f"Price: EUR {best['price']:.2f}\n"
             f"Outbound: {best['duration_out']}\n"
             f"Return:   {best['duration_ret']}\n"
+            f"(Click to open search)"
         )
         self.historic_text.configure(state="normal")
         self.historic_text.delete("1.0", END)
         self.historic_text.insert(END, text)
         self.historic_text.configure(state="disabled")
 
+        # Store link payload and bind click
+        dd = best.get("dep_date")
+        rd = best.get("arrival_date")
+        if best.get("departure") and best.get("destination") and dd and rd:
+            self._historic_best_link = (
+                best["departure"],
+                best["destination"],
+                dd,
+                rd,
+            )
+        else:
+            self._historic_best_link = None
+
+        # Bind once
+        if not hasattr(self, "_historic_click_bound"):
+            self.historic_text.bind("<Button-1>", self._on_historic_click)
+            self._historic_click_bound = True
+
+    def _open_kayak_search(
+        self, dep: str, dest: str, dep_date: str, arrival_date: str
+    ) -> None:
+        """
+        Open the Kayak search URL for the given parameters in the default browser.
+        """
+        import webbrowser
+
+        url = (
+            f"https://www.kayak.fr/flights/"
+            f"{dep}-{dest}/"
+            f"{dep_date}/{arrival_date}?sort=bestflight_a"
+        )
+        try:
+            webbrowser.open(url, new=2)
+        except Exception:
+            messagebox.showerror(
+                "Open URL failed", "Could not open the browser for Kayak."
+            )
+
+    def _on_historic_click(self, event) -> None:
+        """
+        Click handler for the Historic Best Flight text panel.
+        Opens the stored Kayak URL when date info is available.
+        """
+        link = getattr(self, "_historic_best_link", None)
+        if not link:
+            messagebox.showinfo(
+                "No dates available",
+                "This best record does not contain departure/return dates.",
+            )
+            return
+        dep, dest, dd, rd = link
+        self._open_kayak_search(dep, dest, dd, rd)
+
     def _plot_history(self) -> None:
         """
         Plot all stored prices versus their timestamp and enable hover tooltips.
 
         Recreates the annotation after clearing the axes so the tooltip is attached
-        to the current axes. Also stores daily-best details for hover display.
+        to the current axes. Also stores daily-best details (including dep/arr dates
+        when available) for hover display and click-through.
         """
         import matplotlib.dates as mdates  # local import
 
@@ -872,7 +925,11 @@ class FlightBotGUI(tk.Tk):
                     continue
 
                 try:
-                    fmt = "%Y-%m-%d-%H" if len(ts_str.split("-")) == 4 else "%Y-%m-%d"
+                    fmt = (
+                        "%Y-%m-%d-%H"
+                        if len(ts_str.split("-")) == 4
+                        else "%Y-%m-%d"
+                    )
                     ts = datetime.strptime(ts_str, fmt)
                     price_val = float(rec["price"])
                 except (ValueError, TypeError):
@@ -880,7 +937,6 @@ class FlightBotGUI(tk.Tk):
 
                 times.append(ts)
                 prices.append(price_val)
-
                 day_key = ts.strftime("%Y-%m-%d")
                 day_keys.append(day_key)
 
@@ -894,6 +950,9 @@ class FlightBotGUI(tk.Tk):
                         "company": rec.get("company", ""),
                         "duration_out": rec.get("duration_out", ""),
                         "duration_return": rec.get("duration_return", ""),
+                        # Dates may be absent in older rows
+                        "dep_date": rec.get("dep_date"),
+                        "arrival_date": rec.get("arrival_date"),
                     }
 
         if not times:
@@ -904,7 +963,7 @@ class FlightBotGUI(tk.Tk):
         line_list = self.ax.plot_date(times, prices, "-o", picker=5)
         self._line = line_list[0]
 
-        # Recreate the annotation on the fresh axes so it can be shown
+        # Recreate the annotation on the fresh axes so it can be shown and picked
         if hasattr(self, "_point_annotation"):
             try:
                 self._point_annotation.remove()
@@ -919,23 +978,35 @@ class FlightBotGUI(tk.Tk):
             arrowprops=dict(arrowstyle="->"),
             visible=False,
             zorder=10,
+            picker=True,  # enable picking on the annotation text
         )
+        # Make the bubble background clickable as well
+        try:
+            self._point_annotation.get_bbox_patch().set_picker(True)
+        except Exception:
+            pass
 
         # Save data for hover handler
         self._plot_times = times
         self._plot_prices = prices
         self._plot_days = day_keys
         self._daily_best = daily_best
+        # Link payload for the current annotation (set in _on_motion)
+        self._annotation_link = None  # (dep, dest, dep_date, arrival_date)
 
         self.ax.set_xlabel("Monitoring timestamp")
-        self.ax.set_ylabel("Price (€)")
+        self.ax.set_ylabel("Price (EUR)")
         self.figure.autofmt_xdate()
 
         # Ensure handlers are connected
         if not hasattr(self, "_hover_cid"):
-            self._hover_cid = self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+            self._hover_cid = self.canvas.mpl_connect(
+                "motion_notify_event", self._on_motion
+            )
         if not hasattr(self, "_pick_cid"):
-            self._pick_cid = self.canvas.mpl_connect("pick_event", self._on_pick)
+            self._pick_cid = self.canvas.mpl_connect(
+                "pick_event", self._on_pick
+            )
 
         self.canvas.draw_idle()
 
@@ -944,34 +1015,31 @@ class FlightBotGUI(tk.Tk):
         Hover handler: when the mouse is near a plotted point, show an annotation
         bubble with the BEST flight of that calendar day (min price) and details.
 
-        This version converts datetime x-values to Matplotlib date numbers before
-        transforming to pixel space, preventing dtype=object errors.
+        Converts datetime x-values to Matplotlib date numbers before transforming
+        to pixel space and stores a link payload for click-through.
         """
         import matplotlib.dates as mdates
         import numpy as np
 
-        # Must be over our axes and after a plot has been created
         if not hasattr(self, "_line") or event.inaxes is not self.ax:
             if self._point_annotation.get_visible():
                 self._point_annotation.set_visible(False)
+                self._annotation_link = None
                 self.canvas.draw_idle()
             return
 
-        # Get plotted data
         xdata = self._line.get_xdata()
         ydata = self._line.get_ydata()
         if xdata is None or ydata is None or len(xdata) == 0:
             return
 
-        # Helper to coerce x to a numeric Matplotlib date
         def _x_to_num(x):
             try:
-                return float(x)  # already numeric
+                return float(x)
             except Exception:
                 try:
-                    return mdates.date2num(x)  # datetime-like
+                    return mdates.date2num(x)
                 except Exception:
-                    # last resort: try numpy datetime64
                     try:
                         return mdates.date2num(
                             np.datetime64(x)
@@ -981,7 +1049,7 @@ class FlightBotGUI(tk.Tk):
                     except Exception:
                         return None
 
-        threshold_px = 8  # hover tolerance in pixels
+        threshold_px = 8
         min_dist2 = (threshold_px + 1) ** 2
         nearest_idx = None
 
@@ -993,13 +1061,9 @@ class FlightBotGUI(tk.Tk):
                 yn = float(ydata[i])
             except Exception:
                 continue
-
-            # Transform data coords to pixel coords
-            # Use a float array so the transform never sees dtype=object
             px_py = self.ax.transData.transform(
                 np.array([xn, yn], dtype=float)
             )
-            # transform may return shape (2,) or (1, 2); handle both
             px, py = (
                 (px_py[0], px_py[1])
                 if px_py.ndim == 1
@@ -1014,13 +1078,12 @@ class FlightBotGUI(tk.Tk):
                 nearest_idx = i
 
         if nearest_idx is None:
-            # Not close to any point; hide tooltip if visible
             if self._point_annotation.get_visible():
                 self._point_annotation.set_visible(False)
+                self._annotation_link = None
                 self.canvas.draw_idle()
             return
 
-        # We have a nearby vertex; fetch its day key and the daily best details
         day_key = (
             self._plot_days[nearest_idx]
             if hasattr(self, "_plot_days")
@@ -1032,17 +1095,25 @@ class FlightBotGUI(tk.Tk):
             else {}
         )
 
-        # Build tooltip text: prefer daily-best details; fallback to raw point
         if best:
             text = (
                 f"Date: {best.get('date','')}\n"
-                f"Best of day: €{best.get('price', 0):.2f}\n"
+                f"Best of day: EUR {best.get('price', 0):.2f}\n"
                 f"Route: {best.get('departure','')} -> {best.get('destination','')}\n"
                 f"Company: {best.get('company','')}\n"
                 f"Outbound: {best.get('duration_out','')}\n"
                 f"Return:   {best.get('duration_return','')}"
             )
+            dep = best.get("departure")
+            dest = best.get("destination")
+            dd = best.get("dep_date")
+            rd = best.get("arrival_date")
+            self._annotation_link = (
+                (dep, dest, dd, rd) if (dep and dest and dd and rd) else None
+            )
         else:
+            import matplotlib.dates as mdates
+
             ts_str = mdates.num2date(_x_to_num(xdata[nearest_idx])).strftime(
                 "%Y-%m-%d %H:%M"
             )
@@ -1050,9 +1121,9 @@ class FlightBotGUI(tk.Tk):
                 y_val = float(ydata[nearest_idx])
             except Exception:
                 y_val = ydata[nearest_idx]
-            text = f"{ts_str}\n€{y_val:.2f}"
+            text = f"{ts_str}\nEUR {y_val:.2f}"
+            self._annotation_link = None
 
-        # Position and show the annotation near the point (use original data coords)
         self._point_annotation.xy = (xdata[nearest_idx], ydata[nearest_idx])
         self._point_annotation.set_text(text)
         self._point_annotation.set_visible(True)
@@ -1060,22 +1131,34 @@ class FlightBotGUI(tk.Tk):
 
     def _on_pick(self, event) -> None:
         """
-        Show the (timestamp, price) of a clicked data point in a tooltip.
-
-        Robustly converts the x value whether it is already a datetime or a
-        Matplotlib date number, avoiding type errors on num2date().
+        Pick handler.
+        - Clicking on a data point shows the tooltip (existing behavior).
+        - Clicking on the visible annotation bubble opens the Kayak URL for that day
+          when we have dep/arr dates stored.
         """
         from datetime import datetime as _dt
 
         import matplotlib.dates as mdates
         import numpy as np
 
+        # Click on annotation bubble or its bbox -> open Kayak if we have a link
+        if getattr(event, "artist", None) is not None:
+            if event.artist is self._point_annotation or (
+                hasattr(self._point_annotation, "get_bbox_patch")
+                and event.artist is self._point_annotation.get_bbox_patch()
+            ):
+                link = getattr(self, "_annotation_link", None)
+                if link:
+                    dep, dest, dd, rd = link
+                    self._open_kayak_search(dep, dest, dd, rd)
+                return
+
+        # Otherwise, treat as clicking on a plotted point (line pick)
         if hasattr(event, "artist") and event.ind:
-            ind = event.ind[0]  # first picked point
+            ind = event.ind[0]
             xdata, ydata = event.artist.get_data()
             x, y = xdata[ind], ydata[ind]
 
-            # Convert x to a datetime
             ts = None
             if isinstance(x, (float, np.floating, int, np.integer)):
                 try:
@@ -1085,29 +1168,25 @@ class FlightBotGUI(tk.Tk):
             elif isinstance(x, _dt):
                 ts = x
             else:
-                # Try generic conversion path (e.g., numpy.datetime64)
                 try:
                     ts = mdates.num2date(mdates.date2num(x))
                 except Exception:
                     ts = None
 
-            # Build label text
             if ts is not None:
                 ts_str = ts.strftime("%Y-%m-%d %H:%M")
                 try:
                     y_val = float(y)
                 except Exception:
                     y_val = y
-                text = f"{ts_str}\n€{y_val:.2f}"
+                text = f"{ts_str}\nEUR {y_val:.2f}"
             else:
-                # Fallback without timestamp
                 try:
                     y_val = float(y)
                 except Exception:
                     y_val = y
-                text = f"€{y_val:.2f}"
+                text = f"EUR {y_val:.2f}"
 
-            # Update and show annotation
             self._point_annotation.xy = (x, y)
             self._point_annotation.set_text(text)
             self._point_annotation.set_visible(True)
