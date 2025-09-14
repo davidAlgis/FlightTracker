@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools >=42", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling>=1.22"]
+build-backend = "hatchling.build"
 
 [project]
 name = "FlightTracker"
@@ -10,10 +10,9 @@ readme = "README.md"
 requires-python = ">=3.7"
 license = { file = "LICENSE" }
 authors = [
-    { name = "David Algis", email = "david.algis@tutamail.com" }
+  { name = "David Algis", email = "david.algis@tutamail.com" }
 ]
 
-# Runtime dependencies
 dependencies = [
   "numpy>=1.21.0",
   "selenium>=4.0.0",
@@ -25,19 +24,18 @@ dependencies = [
   "matplotlib>=3.7.0"
 ]
 
-# Optional project URLs
 [project.urls]
 Homepage   = "https://github.com/davidAlgis/FlightTracker"
 Repository = "https://github.com/davidAlgis/FlightTracker"
 
-# Define a console script so users can run `flighttracker`
 [project.scripts]
 flighttracker = "flight_tracker.__main__:main"
 
+# Tell Hatchling exactly which package to include (repo root layout)
+[tool.hatch.build.targets.wheel]
+packages = ["flight_tracker"]
+
+# Your linter config can stay as-is
 [tool.flake8]
 max-line-length = 85
 exclude = ["tests/*", "Tests/*"]
-
-[tool.setuptools]
-# Install the flight_tracker directory as a package
-packages = ["flight_tracker"]
