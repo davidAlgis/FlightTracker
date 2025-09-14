@@ -518,9 +518,13 @@ class FlightBotGUI(tk.Tk):
 
     def _monitor_loop(self, deps, dests, pairs, params):
         """
-        Check flights either exhaustively for a single (dep,ret) pair
-        or randomly sample (dep date, duration, airport pair) inside the window.
-        Records results hourly, notifies on new lows or large jumps, then filters airports.
+        Run continuous monitoring with no idle wait between sweeps.
+
+        Behavior:
+          - Random mode: sample a fixed number of random (date, duration, airport pair) per sweep.
+          - Exhaustive mode: test all airport pairs for the single (dep, ret) pair.
+          - Records results, shows alerts, updates charts, supports immediate cancel.
+          - No sleep at the end of a sweep; the next sweep starts immediately.
         """
         from datetime import datetime
 
@@ -536,6 +540,7 @@ class FlightBotGUI(tk.Tk):
                 self.progress.start()
 
                 if random_mode:
+                    # Random sampling inside [window_start, window_end]
                     for _ in range(samples_per_sweep):
                         if self._stop_event.is_set():
                             break
@@ -548,6 +553,7 @@ class FlightBotGUI(tk.Tk):
 
                         latest_dep = window_end - timedelta(days=dur_days)
                         if latest_dep < window_start:
+                            # No valid departure for this duration; skip sample
                             continue
 
                         delta_days = (latest_dep - window_start).days
@@ -621,6 +627,7 @@ class FlightBotGUI(tk.Tk):
                         self._plot_history()
 
                 else:
+                    # Exhaustive over all airport pairs for the single (dep, ret) pair
                     dep_ret_pairs = pairs or []
                     for dep, dest in itertools.product(deps, dests):
                         best_for_pair = None
@@ -696,13 +703,14 @@ class FlightBotGUI(tk.Tk):
                         if self._stop_event.is_set():
                             break
 
+                # Filter after the first exhaustive sweep only
+                if self._first_pass and not random_mode:
+                    self._filter_airports()
+                    self._first_pass = False
+
+                # End of sweep: do not idle; immediately proceed to next sweep
                 self.progress.stop()
-                self.status_label.config(text="Status: waiting")
-                # Wait 30 minutes with 1s polling to allow instant cancel
-                for _ in range(30 * 60):
-                    if self._stop_event.is_set():
-                        break
-                    time.sleep(1)
+                self.status_label.config(text="Status: continuing...")
 
         finally:
             # Ensure no dangling bot handle
