@@ -844,12 +844,21 @@ class FlightBotGUI(tk.Tk):
         self.historic_text.configure(state="disabled")
 
     def _plot_history(self) -> None:
-        """Plot all stored prices versus their timestamp (pickable points)."""
+        """
+        Plot all stored prices versus their timestamp and enable hover tooltips.
+
+        Recreates the annotation after clearing the axes so the tooltip is attached
+        to the current axes. Also stores daily-best details for hover display.
+        """
+        import matplotlib.dates as mdates  # local import
+
         if not os.path.exists(self.record_mgr.path):
             return
 
-        times = []
-        prices = []
+        times: list[datetime] = []
+        prices: list[float] = []
+        day_keys: list[str] = []
+        daily_best: dict[str, dict] = {}
 
         with open(self.record_mgr.path, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -863,11 +872,7 @@ class FlightBotGUI(tk.Tk):
                     continue
 
                 try:
-                    fmt = (
-                        "%Y-%m-%d-%H"
-                        if len(ts_str.split("-")) == 4
-                        else "%Y-%m-%d"
-                    )
+                    fmt = "%Y-%m-%d-%H" if len(ts_str.split("-")) == 4 else "%Y-%m-%d"
                     ts = datetime.strptime(ts_str, fmt)
                     price_val = float(rec["price"])
                 except (ValueError, TypeError):
@@ -876,25 +881,235 @@ class FlightBotGUI(tk.Tk):
                 times.append(ts)
                 prices.append(price_val)
 
+                day_key = ts.strftime("%Y-%m-%d")
+                day_keys.append(day_key)
+
+                prev = daily_best.get(day_key)
+                if prev is None or price_val < prev.get("price", float("inf")):
+                    daily_best[day_key] = {
+                        "date": day_key,
+                        "price": price_val,
+                        "departure": rec.get("departure", ""),
+                        "destination": rec.get("destination", ""),
+                        "company": rec.get("company", ""),
+                        "duration_out": rec.get("duration_out", ""),
+                        "duration_return": rec.get("duration_return", ""),
+                    }
+
         if not times:
             return
 
         self.ax.clear()
-        self.ax.plot_date(times, prices, "-o", picker=5)
+
+        line_list = self.ax.plot_date(times, prices, "-o", picker=5)
+        self._line = line_list[0]
+
+        # Recreate the annotation on the fresh axes so it can be shown
+        if hasattr(self, "_point_annotation"):
+            try:
+                self._point_annotation.remove()
+            except Exception:
+                pass
+        self._point_annotation = self.ax.annotate(
+            text="",
+            xy=(0, 0),
+            xytext=(10, 10),
+            textcoords="offset points",
+            bbox=dict(boxstyle="round", fc="yellow", ec="black", lw=0.5),
+            arrowprops=dict(arrowstyle="->"),
+            visible=False,
+            zorder=10,
+        )
+
+        # Save data for hover handler
+        self._plot_times = times
+        self._plot_prices = prices
+        self._plot_days = day_keys
+        self._daily_best = daily_best
+
         self.ax.set_xlabel("Monitoring timestamp")
-        self.ax.set_ylabel("Price (EUR)")
+        self.ax.set_ylabel("Price (€)")
         self.figure.autofmt_xdate()
-        self.canvas.draw()
+
+        # Ensure handlers are connected
+        if not hasattr(self, "_hover_cid"):
+            self._hover_cid = self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        if not hasattr(self, "_pick_cid"):
+            self._pick_cid = self.canvas.mpl_connect("pick_event", self._on_pick)
+
+        self.canvas.draw_idle()
+
+    def _on_motion(self, event) -> None:
+        """
+        Hover handler: when the mouse is near a plotted point, show an annotation
+        bubble with the BEST flight of that calendar day (min price) and details.
+
+        This version converts datetime x-values to Matplotlib date numbers before
+        transforming to pixel space, preventing dtype=object errors.
+        """
+        import matplotlib.dates as mdates
+        import numpy as np
+
+        # Must be over our axes and after a plot has been created
+        if not hasattr(self, "_line") or event.inaxes is not self.ax:
+            if self._point_annotation.get_visible():
+                self._point_annotation.set_visible(False)
+                self.canvas.draw_idle()
+            return
+
+        # Get plotted data
+        xdata = self._line.get_xdata()
+        ydata = self._line.get_ydata()
+        if xdata is None or ydata is None or len(xdata) == 0:
+            return
+
+        # Helper to coerce x to a numeric Matplotlib date
+        def _x_to_num(x):
+            try:
+                return float(x)  # already numeric
+            except Exception:
+                try:
+                    return mdates.date2num(x)  # datetime-like
+                except Exception:
+                    # last resort: try numpy datetime64
+                    try:
+                        return mdates.date2num(
+                            np.datetime64(x)
+                            .astype("datetime64[ns]")
+                            .astype(object)
+                        )
+                    except Exception:
+                        return None
+
+        threshold_px = 8  # hover tolerance in pixels
+        min_dist2 = (threshold_px + 1) ** 2
+        nearest_idx = None
+
+        for i in range(len(xdata)):
+            xn = _x_to_num(xdata[i])
+            if xn is None:
+                continue
+            try:
+                yn = float(ydata[i])
+            except Exception:
+                continue
+
+            # Transform data coords to pixel coords
+            # Use a float array so the transform never sees dtype=object
+            px_py = self.ax.transData.transform(
+                np.array([xn, yn], dtype=float)
+            )
+            # transform may return shape (2,) or (1, 2); handle both
+            px, py = (
+                (px_py[0], px_py[1])
+                if px_py.ndim == 1
+                else (px_py[0, 0], px_py[0, 1])
+            )
+
+            dx = px - event.x
+            dy = py - event.y
+            d2 = dx * dx + dy * dy
+            if d2 < min_dist2:
+                min_dist2 = d2
+                nearest_idx = i
+
+        if nearest_idx is None:
+            # Not close to any point; hide tooltip if visible
+            if self._point_annotation.get_visible():
+                self._point_annotation.set_visible(False)
+                self.canvas.draw_idle()
+            return
+
+        # We have a nearby vertex; fetch its day key and the daily best details
+        day_key = (
+            self._plot_days[nearest_idx]
+            if hasattr(self, "_plot_days")
+            else None
+        )
+        best = (
+            self._daily_best.get(day_key, {})
+            if hasattr(self, "_daily_best")
+            else {}
+        )
+
+        # Build tooltip text: prefer daily-best details; fallback to raw point
+        if best:
+            text = (
+                f"Date: {best.get('date','')}\n"
+                f"Best of day: €{best.get('price', 0):.2f}\n"
+                f"Route: {best.get('departure','')} -> {best.get('destination','')}\n"
+                f"Company: {best.get('company','')}\n"
+                f"Outbound: {best.get('duration_out','')}\n"
+                f"Return:   {best.get('duration_return','')}"
+            )
+        else:
+            ts_str = mdates.num2date(_x_to_num(xdata[nearest_idx])).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+            try:
+                y_val = float(ydata[nearest_idx])
+            except Exception:
+                y_val = ydata[nearest_idx]
+            text = f"{ts_str}\n€{y_val:.2f}"
+
+        # Position and show the annotation near the point (use original data coords)
+        self._point_annotation.xy = (xdata[nearest_idx], ydata[nearest_idx])
+        self._point_annotation.set_text(text)
+        self._point_annotation.set_visible(True)
+        self.canvas.draw_idle()
 
     def _on_pick(self, event) -> None:
-        """Show the (timestamp, price) of a clicked data point in a tooltip."""
+        """
+        Show the (timestamp, price) of a clicked data point in a tooltip.
+
+        Robustly converts the x value whether it is already a datetime or a
+        Matplotlib date number, avoiding type errors on num2date().
+        """
+        from datetime import datetime as _dt
+
+        import matplotlib.dates as mdates
+        import numpy as np
+
         if hasattr(event, "artist") and event.ind:
-            ind = event.ind[0]
+            ind = event.ind[0]  # first picked point
             xdata, ydata = event.artist.get_data()
             x, y = xdata[ind], ydata[ind]
-            ts_str = matplotlib.dates.num2date(x).strftime("%Y-%m-%d %H:%M")
+
+            # Convert x to a datetime
+            ts = None
+            if isinstance(x, (float, np.floating, int, np.integer)):
+                try:
+                    ts = mdates.num2date(float(x))
+                except Exception:
+                    ts = None
+            elif isinstance(x, _dt):
+                ts = x
+            else:
+                # Try generic conversion path (e.g., numpy.datetime64)
+                try:
+                    ts = mdates.num2date(mdates.date2num(x))
+                except Exception:
+                    ts = None
+
+            # Build label text
+            if ts is not None:
+                ts_str = ts.strftime("%Y-%m-%d %H:%M")
+                try:
+                    y_val = float(y)
+                except Exception:
+                    y_val = y
+                text = f"{ts_str}\n€{y_val:.2f}"
+            else:
+                # Fallback without timestamp
+                try:
+                    y_val = float(y)
+                except Exception:
+                    y_val = y
+                text = f"€{y_val:.2f}"
+
+            # Update and show annotation
             self._point_annotation.xy = (x, y)
-            self._point_annotation.set_text(f"{ts_str}\nEUR {y:.2f}")
+            self._point_annotation.set_text(text)
             self._point_annotation.set_visible(True)
             self.canvas.draw_idle()
 
