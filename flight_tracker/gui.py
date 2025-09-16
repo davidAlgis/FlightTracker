@@ -921,6 +921,7 @@ class FlightBotGUI(tk.Tk):
         Read flight_records.jsonl and show the single cheapest record ever found.
         Works with both legacy daily records (key date) and the new hourly records
         (key datetime). Stores a click-through link when dates are available.
+        Now also displays the trip dates (dep_date -> arrival_date) when present.
         """
         if not os.path.exists(self.record_mgr.path):
             return
@@ -951,7 +952,6 @@ class FlightBotGUI(tk.Tk):
                         "price": price_val,
                         "duration_out": rec.get("duration_out", ""),
                         "duration_ret": rec.get("duration_return", ""),
-                        # may be absent on older rows
                         "dep_date": rec.get("dep_date"),
                         "arrival_date": rec.get("arrival_date"),
                     }
@@ -959,9 +959,14 @@ class FlightBotGUI(tk.Tk):
         if best is None:
             return
 
+        dd = best.get("dep_date")
+        rd = best.get("arrival_date")
+        trip_line = f"Trip: {dd} -> {rd}\n" if dd and rd else ""
+
         text = (
             f"Date/Hour: {best['ts']}\n"
             f"Route: {best['departure']} -> {best['destination']}\n"
+            f"{trip_line}"
             f"Company: {best['company']}\n"
             f"Price: EUR {best['price']:.2f}\n"
             f"Outbound: {best['duration_out']}\n"
@@ -974,8 +979,6 @@ class FlightBotGUI(tk.Tk):
         self.historic_text.configure(state="disabled")
 
         # Store link payload and bind click
-        dd = best.get("dep_date")
-        rd = best.get("arrival_date")
         if best.get("departure") and best.get("destination") and dd and rd:
             self._historic_best_link = (
                 best["departure"],
@@ -986,7 +989,6 @@ class FlightBotGUI(tk.Tk):
         else:
             self._historic_best_link = None
 
-        # Bind once
         if not hasattr(self, "_historic_click_bound"):
             self.historic_text.bind("<Button-1>", self._on_historic_click)
             self._historic_click_bound = True
@@ -1145,9 +1147,7 @@ class FlightBotGUI(tk.Tk):
         """
         Hover handler: when the mouse is near a plotted point, show an annotation
         bubble with the BEST flight of that calendar day (min price) and details.
-
-        Converts datetime x-values to Matplotlib date numbers before transforming
-        to pixel space and stores a link payload for click-through.
+        Now also displays the trip dates (dep_date -> arrival_date) when available.
         """
         import matplotlib.dates as mdates
         import numpy as np
@@ -1227,8 +1227,12 @@ class FlightBotGUI(tk.Tk):
         )
 
         if best:
+            dd = best.get("dep_date")
+            rd = best.get("arrival_date")
+            trip_line = f"Trip: {dd} -> {rd}\n" if dd and rd else ""
             text = (
                 f"Date: {best.get('date','')}\n"
+                f"{trip_line}"
                 f"Best of day: EUR {best.get('price', 0):.2f}\n"
                 f"Route: {best.get('departure','')} -> {best.get('destination','')}\n"
                 f"Company: {best.get('company','')}\n"
@@ -1237,14 +1241,10 @@ class FlightBotGUI(tk.Tk):
             )
             dep = best.get("departure")
             dest = best.get("destination")
-            dd = best.get("dep_date")
-            rd = best.get("arrival_date")
             self._annotation_link = (
                 (dep, dest, dd, rd) if (dep and dest and dd and rd) else None
             )
         else:
-            import matplotlib.dates as mdates
-
             ts_str = mdates.num2date(_x_to_num(xdata[nearest_idx])).strftime(
                 "%Y-%m-%d %H:%M"
             )
