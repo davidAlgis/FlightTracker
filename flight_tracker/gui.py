@@ -1030,22 +1030,21 @@ class FlightBotGUI(tk.Tk):
 
     def _plot_history(self) -> None:
         """
-        Plot all stored prices versus their timestamp and enable hover tooltips.
+        Plot ONE dot per calendar day: the best (lowest) price recorded that day.
 
-        Recreates the annotation after clearing the axes so the tooltip is attached
-        to the current axes. Also stores daily-best details (including dep/arr dates
-        when available) for hover display and click-through.
+        We first aggregate all hourly records into a daily_best map, then plot the
+        per-day minima only. Hover/click still show the full details of that day's
+        best record, including dep/arr dates when available.
         """
         import matplotlib.dates as mdates  # local import
 
         if not os.path.exists(self.record_mgr.path):
             return
 
-        times: list[datetime] = []
-        prices: list[float] = []
-        day_keys: list[str] = []
-        daily_best: dict[str, dict] = {}
+        from datetime import datetime as _dt
 
+        # 1) Aggregate: keep only the best (lowest) price per day, with details.
+        daily_best: dict[str, dict] = {}
         with open(self.record_mgr.path, "r", encoding="utf-8") as fh:
             for line in fh:
                 try:
@@ -1058,21 +1057,13 @@ class FlightBotGUI(tk.Tk):
                     continue
 
                 try:
-                    fmt = (
-                        "%Y-%m-%d-%H"
-                        if len(ts_str.split("-")) == 4
-                        else "%Y-%m-%d"
-                    )
-                    ts = datetime.strptime(ts_str, fmt)
+                    fmt = "%Y-%m-%d-%H" if len(ts_str.split("-")) == 4 else "%Y-%m-%d"
+                    ts = _dt.strptime(ts_str, fmt)
                     price_val = float(rec["price"])
                 except (ValueError, TypeError):
                     continue
 
-                times.append(ts)
-                prices.append(price_val)
                 day_key = ts.strftime("%Y-%m-%d")
-                day_keys.append(day_key)
-
                 prev = daily_best.get(day_key)
                 if prev is None or price_val < prev.get("price", float("inf")):
                     daily_best[day_key] = {
@@ -1083,16 +1074,20 @@ class FlightBotGUI(tk.Tk):
                         "company": rec.get("company", ""),
                         "duration_out": rec.get("duration_out", ""),
                         "duration_return": rec.get("duration_return", ""),
-                        # Dates may be absent in older rows
                         "dep_date": rec.get("dep_date"),
                         "arrival_date": rec.get("arrival_date"),
                     }
 
-        if not times:
+        if not daily_best:
             return
 
-        self.ax.clear()
+        # 2) Build per-day series (sorted by date) → one point per day.
+        days_sorted = sorted(daily_best.keys())
+        times = [_dt.strptime(d, "%Y-%m-%d") for d in days_sorted]
+        prices = [daily_best[d]["price"] for d in days_sorted]
 
+        # 3) Plot.
+        self.ax.clear()
         line_list = self.ax.plot_date(times, prices, "-o", picker=5)
         self._line = line_list[0]
 
@@ -1111,35 +1106,29 @@ class FlightBotGUI(tk.Tk):
             arrowprops=dict(arrowstyle="->"),
             visible=False,
             zorder=10,
-            picker=True,  # enable picking on the annotation text
+            picker=True,
         )
-        # Make the bubble background clickable as well
         try:
             self._point_annotation.get_bbox_patch().set_picker(True)
         except Exception:
             pass
 
-        # Save data for hover handler
+        # 4) Save data for hover/click handlers.
         self._plot_times = times
         self._plot_prices = prices
-        self._plot_days = day_keys
-        self._daily_best = daily_best
-        # Link payload for the current annotation (set in _on_motion)
-        self._annotation_link = None  # (dep, dest, dep_date, arrival_date)
+        self._plot_days = days_sorted           # <— one entry per plotted point
+        self._daily_best = daily_best           # details keyed by YYYY-MM-DD
+        self._annotation_link = None            # (dep, dest, dep_date, arrival_date)
 
-        self.ax.set_xlabel("Monitoring timestamp")
+        self.ax.set_xlabel("Monitoring date")
         self.ax.set_ylabel("Price (EUR)")
         self.figure.autofmt_xdate()
 
-        # Ensure handlers are connected
+        # Ensure handlers are connected once
         if not hasattr(self, "_hover_cid"):
-            self._hover_cid = self.canvas.mpl_connect(
-                "motion_notify_event", self._on_motion
-            )
+            self._hover_cid = self.canvas.mpl_connect("motion_notify_event", self._on_motion)
         if not hasattr(self, "_pick_cid"):
-            self._pick_cid = self.canvas.mpl_connect(
-                "pick_event", self._on_pick
-            )
+            self._pick_cid = self.canvas.mpl_connect("pick_event", self._on_pick)
 
         self.canvas.draw_idle()
 
