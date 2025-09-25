@@ -1057,7 +1057,11 @@ class FlightBotGUI(tk.Tk):
                     continue
 
                 try:
-                    fmt = "%Y-%m-%d-%H" if len(ts_str.split("-")) == 4 else "%Y-%m-%d"
+                    fmt = (
+                        "%Y-%m-%d-%H"
+                        if len(ts_str.split("-")) == 4
+                        else "%Y-%m-%d"
+                    )
                     ts = _dt.strptime(ts_str, fmt)
                     price_val = float(rec["price"])
                 except (ValueError, TypeError):
@@ -1116,9 +1120,9 @@ class FlightBotGUI(tk.Tk):
         # 4) Save data for hover/click handlers.
         self._plot_times = times
         self._plot_prices = prices
-        self._plot_days = days_sorted           # <— one entry per plotted point
-        self._daily_best = daily_best           # details keyed by YYYY-MM-DD
-        self._annotation_link = None            # (dep, dest, dep_date, arrival_date)
+        self._plot_days = days_sorted  # <— one entry per plotted point
+        self._daily_best = daily_best  # details keyed by YYYY-MM-DD
+        self._annotation_link = None  # (dep, dest, dep_date, arrival_date)
 
         self.ax.set_xlabel("Monitoring date")
         self.ax.set_ylabel("Price (EUR)")
@@ -1126,9 +1130,13 @@ class FlightBotGUI(tk.Tk):
 
         # Ensure handlers are connected once
         if not hasattr(self, "_hover_cid"):
-            self._hover_cid = self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+            self._hover_cid = self.canvas.mpl_connect(
+                "motion_notify_event", self._on_motion
+            )
         if not hasattr(self, "_pick_cid"):
-            self._pick_cid = self.canvas.mpl_connect("pick_event", self._on_pick)
+            self._pick_cid = self.canvas.mpl_connect(
+                "pick_event", self._on_pick
+            )
 
         self.canvas.draw_idle()
 
@@ -1586,18 +1594,81 @@ class FlightBotGUI(tk.Tk):
         prev_best_price: float | None,
     ) -> None:
         """
-        Apply very small, pool-size-scaled updates to the three probability families.
+        Update weights using the *historical percentile* of the found price.
 
-        Signals:
-          - No result: mild penalty.
-          - Good (within +2% of prev best): small reward scaled by closeness.
-          - Clearly worse (>= +50% vs prev best): small penalty.
+        Reward tiers (lower price = better):
+          • All-time best ever  ................. strongest reward
+          • Top 1% of all recorded prices ...... very strong reward
+          • Top 10% ............................. strong reward
+          • Top 50% (<= median) ................. mild reward
+          • > 50% ............................... tiny penalty
+          • >= 90% (worst decile) ............... small penalty
+          • No valid result ..................... mild penalty
 
-        Everything is intentionally slow so we keep exploring for a long time.
+        Notes
+        -----
+        - Updates remain *slow*: `_adjust_weight` scales by pool size and blends
+          back toward uniform each step, so even strong rewards move weights
+          gently.
+        - If we don't have enough history yet (fewer than 5 prices), we fall
+          back to the previous "near previous best" heuristic to avoid noisy jumps.
         """
-        # Default: tiny penalty when nothing matched constraints
+        import json
+        import os
+
+        # 1) No-result path: tiny penalty, applied to the three families.
         if result_price is None:
-            signal = -1.0
+            for cat, key, pool in (
+                ("dep_airports", dep_key, deps_pool),
+                ("dest_airports", dest_key, dests_pool),
+                ("dates", date_key, dates_pool),
+            ):
+                self._adjust_weight(cat, key, -1.0, pool)
+            return
+
+        # 2) Load historical prices to compute percentiles.
+        prices: list[float] = []
+        try:
+            if os.path.exists(self.record_mgr.path):
+                with open(self.record_mgr.path, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            rec = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        try:
+                            prices.append(float(rec["price"]))
+                        except Exception:
+                            continue
+        except Exception:
+            prices = []
+
+        # 3) If insufficient history, fall back to the older ratio logic (slow).
+        if len(prices) < 5 or (
+            prev_best_price is None or prev_best_price <= 0
+        ):
+            ratio = (
+                float(result_price) / float(prev_best_price)
+                if prev_best_price and prev_best_price > 0
+                else 1.0
+            )
+            NEAR_THRESH = 1.02  # within +2% of prev best is "good"
+            WORSE_THRESH = 1.50  # >= +50% worse is "bad"
+
+            if ratio <= NEAR_THRESH:
+                # Reward scaled by closeness to previous best
+                closeness = max(
+                    0.0,
+                    min(
+                        1.0, (NEAR_THRESH - ratio) / (NEAR_THRESH - 1.0 + 1e-9)
+                    ),
+                )
+                signal = 0.25 + 0.75 * closeness  # [0.25, 1.0]
+            elif ratio >= WORSE_THRESH:
+                signal = -1.0
+            else:
+                return  # neutral zone
+
             for cat, key, pool in (
                 ("dep_airports", dep_key, deps_pool),
                 ("dest_airports", dest_key, dests_pool),
@@ -1606,29 +1677,32 @@ class FlightBotGUI(tk.Tk):
                 self._adjust_weight(cat, key, signal, pool)
             return
 
-        # If we do not have a baseline yet, do not update.
-        if prev_best_price is None or prev_best_price <= 0:
-            return
+        # 4) Percentile-based tiers over the *historical* distribution.
+        prices_sorted = sorted(p for p in prices if p > 0)
+        N = len(prices_sorted)
+        hist_min = prices_sorted[0]
 
-        ratio = float(result_price) / float(prev_best_price)
+        # Percentile rank of current result among historical prices (lower is better).
+        # percent_rank in (0,1]; e.g., 0.10 means in the best 10% historically.
+        rank_count = sum(1 for p in prices_sorted if p <= result_price)
+        percent_rank = rank_count / N
 
-        # Thresholds tuned for slow updates
-        NEAR_THRESH = 1.02  # within +2% of prev best is "good"
-        WORSE_THRESH = 1.50  # >= +50% worse is "bad"
+        # Decile threshold for penalty
+        p90 = prices_sorted[int(0.9 * (N - 1))]
 
-        if ratio <= NEAR_THRESH:
-            # Scale reward by how close we are (1.0 exactly best, 0.0 at threshold)
-            closeness = max(
-                0.0,
-                min(1.0, (NEAR_THRESH - ratio) / (NEAR_THRESH - 1.0 + 1e-9)),
-            )
-            signal = 0.25 + 0.75 * closeness  # in [0.25, 1.0]
-        elif ratio >= WORSE_THRESH:
-            # Fixed mild penalty
-            signal = -1.0
+        # Stronger rewards for better percentiles; still "slow" via _adjust_weight.
+        if result_price < hist_min - 1e-9:
+            # New all-time low
+            signal = 1.0
+        elif percent_rank <= 0.01:
+            signal = 0.85
+        elif percent_rank <= 0.10:
+            signal = 0.60
+        elif percent_rank <= 0.50:
+            signal = 0.35
         else:
-            # Neutral zone: no update
-            return
+            # Above median: slight penalty, harsher if in worst decile
+            signal = -0.60 if result_price >= p90 else -0.15
 
         for cat, key, pool in (
             ("dep_airports", dep_key, deps_pool),
