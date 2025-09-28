@@ -580,12 +580,13 @@ class FlightBotGUI(tk.Tk):
         """
         Continuous monitoring with quiet offline handling.
 
-        When a scrape detects offline (network/DNS error), pause for 60 seconds and
-        retry, without crashing the thread.
+        Random mode uses Discounted Thompson Sampling + Additive Surrogate to
+        propose candidates in small daily batches. Archive forgets exponentially
+        across days and is retroactively bootstrapped from flight_records.jsonl.
         """
         from datetime import datetime
 
-        _ = self._get_weights()  # ensure weights loaded (no-op if already)
+        _ = self._get_weights()  # keep existing lazy-load (no-op)
 
         random_mode = bool(params.get("random_mode"))
         window_start = params.get("window_start")
@@ -595,6 +596,16 @@ class FlightBotGUI(tk.Tk):
 
         OFFLINE_WAIT_SEC = 60
 
+        # TS/surrogate archive (persistent)
+        arch = self._archive_load()
+
+        # NEW: retroactive, incremental bootstrap from existing JSONL
+        self._archive_bootstrap_from_records(arch)
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        self._archive_decay(arch, today_str)
+        self._archive_save(arch)
+
         try:
             while not self._stop_event.is_set():
                 self.status_label.config(text="Status: checking flights...")
@@ -603,39 +614,37 @@ class FlightBotGUI(tk.Tk):
                 if random_mode:
                     deps_pool = list(deps)
                     dests_pool = list(dests)
-                    self._init_weights_for_category("dep_airports", deps_pool)
-                    self._init_weights_for_category(
-                        "dest_airports", dests_pool
+
+                    # Build date pool in the current window based on durations
+                    dates_pool = []
+                    if window_start and window_end and durations:
+                        latest_dep_all = [
+                            (window_end - timedelta(days=int(d))).date()
+                            for d in durations
+                        ]
+                        latest_dep = min(latest_dep_all) if latest_dep_all else window_end.date()
+                        num_days = max(
+                            0, (latest_dep - window_start.date()).days + 1
+                        )
+                        for i in range(num_days):
+                            dates_pool.append(
+                                (window_start + timedelta(days=i)).strftime("%Y-%m-%d")
+                            )
+
+                    proposals = self._propose_batch_ts_additive(
+                        arch=arch,
+                        deps_pool=deps_pool,
+                        dests_pool=dests_pool,
+                        dates_pool=dates_pool,
+                        durations=list(map(int, durations)) if durations else [],
+                        q=max(1, samples_per_sweep),
+                        random_floor_frac=0.10,
+                        beam_k=20,
                     )
 
-                    for _ in range(samples_per_sweep):
+                    for dep, dest, dd, rd in proposals:
                         if self._stop_event.is_set():
                             break
-                        if not deps_pool or not dests_pool or not durations:
-                            continue
-
-                        dur_days = int(random.choice(durations))
-                        latest_dep = window_end - timedelta(days=dur_days)
-                        if latest_dep < window_start:
-                            continue
-                        num_days = (latest_dep - window_start).days + 1
-                        dates_pool = [
-                            (window_start + timedelta(days=i)).strftime(
-                                "%Y-%m-%d"
-                            )
-                            for i in range(num_days)
-                        ]
-                        self._ensure_date_weights(dates_pool)
-
-                        dep = self._choose_weighted("dep_airports", deps_pool)
-                        dest = self._choose_weighted(
-                            "dest_airports", dests_pool
-                        )
-                        date_key = self._choose_weighted("dates", dates_pool)
-                        dep_dt = datetime.strptime(date_key, "%Y-%m-%d")
-                        ret_dt = dep_dt + timedelta(days=dur_days)
-                        dd = dep_dt.strftime("%Y-%m-%d")
-                        rd = ret_dt.strftime("%Y-%m-%d")
 
                         self.status_label.config(
                             text=f"Checking {dep}->{dest} on {dd} -> {rd}"
@@ -658,7 +667,6 @@ class FlightBotGUI(tk.Tk):
                             break
 
                         if is_offline:
-                            # Quiet offline backoff: wait 60s, allow cancel, then continue
                             try:
                                 self.status_label.config(
                                     text="Status: offline, retrying in 60s"
@@ -669,22 +677,18 @@ class FlightBotGUI(tk.Tk):
                                 if self._stop_event.is_set():
                                     break
                                 time.sleep(1)
-                            break  # break inner sample loop; outer while will try again
+                            break
+
+                        key = self._archive_key(dep, dest, dd, rd)
+
                         if not rec:
-                            # No flight matched constraints; adapt weights slowly
-                            self._update_adaptive_after_result(
-                                dep,
-                                dest,
-                                date_key,
-                                deps_pool,
-                                dests_pool,
-                                dates_pool,
-                                result_price=None,
-                                prev_best_price=prev_best,
-                            )
+                            gb = self._get_global_best_price()
+                            y = (gb * 1.10) if (gb is not None and gb > 0) else 1.0
+                            self._archive_add_observation(arch, key, float(y), today_str)
+                            self._archive_save(arch)
                             continue
 
-                        price = rec["price"]
+                        price = float(rec["price"])
                         timestamp = datetime.now().strftime("%Y-%m-%d-%H")
                         self.record_mgr.save_record(
                             timestamp,
@@ -698,16 +702,8 @@ class FlightBotGUI(tk.Tk):
                             rec.get("arrival_date"),
                         )
 
-                        self._update_adaptive_after_result(
-                            dep,
-                            dest,
-                            date_key,
-                            deps_pool,
-                            dests_pool,
-                            dates_pool,
-                            result_price=float(price),
-                            prev_best_price=prev_best,
-                        )
+                        self._archive_add_observation(arch, key, price, today_str)
+                        self._archive_save(arch)
 
                         global_prev = self._get_global_best_price()
                         if global_prev is None or price < global_prev:
@@ -722,9 +718,9 @@ class FlightBotGUI(tk.Tk):
                             datetime.now() - timedelta(days=3)
                         ).strftime("%Y-%m-%d-%H")
                         old_rec = self.record_mgr.load_record(three_days_ago)
-                        if old_rec and price > old_rec["price"] * 1.1:
-                            diff = price - old_rec["price"]
-                            pct = diff / old_rec["price"] * 100
+                        if old_rec and price > float(old_rec["price"]) * 1.1:
+                            diff = price - float(old_rec["price"])
+                            pct = diff / float(old_rec["price"]) * 100.0
                             self.notifier.show_toast(
                                 "Price Jump Alert",
                                 f"{dep}->{dest} jumped EUR {diff:.2f} (+{pct:.0f}%) vs 3 days ago",
@@ -778,7 +774,7 @@ class FlightBotGUI(tk.Tk):
                                     if self._stop_event.is_set():
                                         break
                                     time.sleep(1)
-                                break  # break inner date loop; outer while will retry
+                                break
                             if not rec:
                                 continue
 
@@ -1137,6 +1133,15 @@ class FlightBotGUI(tk.Tk):
             self._pick_cid = self.canvas.mpl_connect(
                 "pick_event", self._on_pick
             )
+
+        # NEW: bind F12 once to open the TS archive popup
+        if not hasattr(self, "_ts_debug_bound") or not getattr(self, "_ts_debug_bound", False):
+            try:
+                self.bind("<F12>", self._show_ts_archive_popup)
+                self._ts_debug_bound = True
+            except Exception:
+                # If binding fails for any reason, do not crash the UI.
+                self._ts_debug_bound = False
 
         self.canvas.draw_idle()
 
@@ -1710,6 +1715,699 @@ class FlightBotGUI(tk.Tk):
             ("dates", date_key, dates_pool),
         ):
             self._adjust_weight(cat, key, signal, pool)
+
+    def _archive_path(self) -> str:
+        """
+        Return path for TS/surrogate archive JSON.
+        Lives next to config.json as 'ts_archive.json'.
+        """
+        cfg_path = getattr(self.config_mgr, "path", "config.json")
+        root = os.path.dirname(os.path.abspath(cfg_path))
+        return os.path.join(root, "ts_archive.json")
+
+    def _archive_load(self) -> dict:
+        """
+        Load discounted per-arm statistics for Thompson Sampling and the
+        additive surrogate.
+
+        File schema:
+        {
+          "gamma": 0.98,
+          "stats": {
+             "DEP|DEST|YYYY-MM-DD|YYYY-MM-DD": {
+                 "mu": float,
+                 "var": float,
+                 "n": float,
+                 "last_date": "YYYY-MM-DD"
+             },
+             ...
+          }
+        }
+        """
+        path = self._archive_path()
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                    if isinstance(data, dict) and "stats" in data:
+                        if "gamma" not in data or not (0.0 < float(data["gamma"]) < 1.0):
+                            data["gamma"] = 0.98
+                        if not isinstance(data["stats"], dict):
+                            data["stats"] = {}
+                        return data
+        except Exception:
+            pass
+        return {"gamma": 0.98, "stats": {}}
+
+
+    def _archive_save(self, arch: dict) -> None:
+        """
+        Persist TS/surrogate archive to disk safely.
+        """
+        try:
+            path = self._archive_path()
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(arch, fh, indent=2)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+
+
+    def _archive_key(self, dep: str, dest: str, dep_date: str, ret_date: str) -> str:
+        """
+        Build a unique key for a (dep, dest, dep_date, ret_date) arm.
+        """
+        return f"{dep}|{dest}|{dep_date}|{ret_date}"
+
+    def _archive_decay(self, arch: dict, today: str) -> None:
+        """
+        Apply day-wise exponential forgetting to all arms based on 'last_date'.
+        If last_date < today, multiply (mu, var, n) by gamma**delta_days.
+        """
+        from datetime import datetime as _dt
+
+        fmt = "%Y-%m-%d"
+        try:
+            t_today = _dt.strptime(today, fmt)
+        except Exception:
+            return
+
+        gamma = float(arch.get("gamma", 0.98))
+        stats = arch.get("stats", {})
+        for k, s in list(stats.items()):
+            try:
+                last = s.get("last_date")
+                if not last:
+                    s["last_date"] = today
+                    continue
+                t_last = _dt.strptime(last, fmt)
+                delta = (t_today - t_last).days
+                if delta <= 0:
+                    continue
+                factor = gamma ** float(delta)
+                s["mu"] = float(s.get("mu", 0.0)) * factor
+                s["var"] = float(s.get("var", 1.0)) * factor
+                s["n"] = float(s.get("n", 0.0)) * factor
+                s["last_date"] = today
+            except Exception:
+                # If any entry is malformed, drop it defensively.
+                stats.pop(k, None)
+        arch["stats"] = stats
+
+    def _archive_add_observation(self, arch: dict, key: str, y: float, today: str) -> None:
+        """
+        Discounted online update of per-arm statistics.
+        Uses an EWMA for mean and variance (Bessel-free), and a discounted 'n'.
+
+        If the arm is new, initialize with mu=y, var=1.0 (unit noise), n=1.0.
+        """
+        gamma = float(arch.get("gamma", 0.98))
+        stats = arch.setdefault("stats", {})
+        s = stats.get(key, {"mu": float(y), "var": 1.0, "n": 1.0, "last_date": today})
+
+        # Apply same-day decay to keep consistency (no-op if last_date == today).
+        self._archive_decay(arch, today)
+        mu_prev = float(s.get("mu", float(y)))
+        var_prev = float(s.get("var", 1.0))
+        n_prev = float(s.get("n", 0.0))
+
+        alpha = 1.0 - gamma  # EWMA step
+        mu_new = gamma * mu_prev + alpha * float(y)
+        # EWMA variance around evolving mean
+        var_new = gamma * var_prev + alpha * (float(y) - mu_new) ** 2
+        n_new = gamma * n_prev + 1.0
+
+        s.update({"mu": mu_new, "var": max(1e-6, var_new), "n": n_new, "last_date": today})
+        stats[key] = s
+        arch["stats"] = stats
+
+    def _fit_additive_surrogate(self, arch: dict) -> tuple[dict, dict, dict]:
+        """
+        Fit a very light additive surrogate:
+            f(dep, dest, date) ~= alpha(dep) + beta(dest) + gamma(date)
+
+        We use each arm's discounted mean as a target, weighted by its discounted n.
+        Returns (alpha_map, beta_map, gamma_map) as dictionaries of scores.
+        Unseen items simply do not appear and will be treated as 0 in scoring.
+        """
+        import numpy as np
+
+        stats = arch.get("stats", {})
+        if not stats:
+            return {}, {}, {}
+
+        deps, dests, dates = [], [], []
+        y_list, w_list = [], []
+
+        for k, s in stats.items():
+            try:
+                dep, dest, dep_date, _ret = k.split("|")
+                deps.append(dep)
+                dests.append(dest)
+                dates.append(dep_date)
+                y_list.append(float(s.get("mu", 0.0)))
+                w_list.append(max(0.0, float(s.get("n", 0.0))))
+            except Exception:
+                continue
+
+        if not y_list:
+            return {}, {}, {}
+
+        uniq_dep = sorted(set(deps))
+        uniq_dest = sorted(set(dests))
+        uniq_date = sorted(set(dates))
+
+        idx_dep = {d: i for i, d in enumerate(uniq_dep)}
+        idx_dest = {d: i for i, d in enumerate(uniq_dest)}
+        idx_date = {d: i for i, d in enumerate(uniq_date)}
+
+        m = len(y_list)
+        p = len(uniq_dep) + len(uniq_dest) + len(uniq_date)
+
+        # Design matrix for ridge on additive effects: [I_dep | I_dest | I_date]
+        X = np.zeros((m, p), dtype=float)
+        y = np.array(y_list, dtype=float)
+        w = np.array(w_list, dtype=float)
+
+        for r, (dep, dest, date) in enumerate(zip(deps, dests, dates)):
+            X[r, idx_dep[dep]] = 1.0
+            X[r, len(uniq_dep) + idx_dest[dest]] = 1.0
+            X[r, len(uniq_dep) + len(uniq_dest) + idx_date[date]] = 1.0
+
+        # Weighted ridge: (X^T W X + lambda I)^{-1} X^T W y
+        # Use small ridge to stabilize (lambda=1e-3).
+        lam = 1e-3
+        W = np.diag(w) if np.all(w >= 0.0) else np.eye(m)
+        XtW = X.T @ W
+        A = XtW @ X + lam * np.eye(p)
+        b = XtW @ y
+        try:
+            coef = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            coef = np.linalg.lstsq(A, b, rcond=None)[0]
+
+        alpha = {
+            d: float(coef[idx_dep[d]]) for d in uniq_dep
+        }
+        beta = {
+            d: float(coef[len(uniq_dep) + idx_dest[d]]) for d in uniq_dest
+        }
+        gamma = {
+            d: float(coef[len(uniq_dep) + len(uniq_dest) + idx_date[d]]) for d in uniq_date
+        }
+        return alpha, beta, gamma
+
+    def _propose_batch_ts_additive(
+        self,
+        arch: dict,
+        deps_pool: list[str],
+        dests_pool: list[str],
+        dates_pool: list[str],
+        durations: list[int],
+        q: int,
+        random_floor_frac: float = 0.10,
+        beam_k: int = 20,
+    ) -> list[tuple[str, str, str, str]]:
+        """
+        Propose up to q (dep, dest, dep_date, ret_date) candidates using:
+          - Thompson Sampling on previously seen arms (exploit + explore via variance)
+          - Additive surrogate + beam search to score unseen arms
+          - A small random floor to never fully discard options
+
+        Returns a deduplicated list of tuples (dep, dest, dd, rd).
+        """
+        import heapq
+        import numpy as np
+        from datetime import datetime as _dt, timedelta as _td
+
+        def _ret_date(dd: str, dur: int) -> str:
+            try:
+                d0 = _dt.strptime(dd, "%Y-%m-%d")
+                return (d0 + _td(days=int(dur))).strftime("%Y-%m-%d")
+            except Exception:
+                return dd
+
+        # 1) Thompson on seen arms
+        seen_candidates = []
+        stats = arch.get("stats", {})
+        for k, s in stats.items():
+            try:
+                dep, dest, dd, rd = k.split("|")
+            except Exception:
+                continue
+            mu = float(s.get("mu", 0.0))
+            var = max(1e-6, float(s.get("var", 1.0)))
+            n = max(0.0, float(s.get("n", 0.0)))
+            # Posterior sampling: Normal(mu, var/(n+1)) as a pragmatic choice
+            post_var = var / (n + 1.0)
+            sample = np.random.normal(loc=mu, scale=max(1e-6, np.sqrt(post_var)))
+            seen_candidates.append((sample, (dep, dest, dd, rd)))
+
+        seen_candidates.sort(key=lambda t: t[0])  # minimize sample
+        q_seen = int(q * 0.6)
+        picked = [cand for _s, cand in seen_candidates[:q_seen]]
+
+        # 2) Additive surrogate for unseen
+        alpha, beta, gamma = self._fit_additive_surrogate(arch)
+
+        # Rank each factor; take top-k for beam
+        def _topk(dct: dict, k: int, universe: list[str]) -> list[str]:
+            if not dct:
+                # If no learned scores yet, fall back to uniform beam from pool
+                return universe[: min(k, len(universe))]
+            items = [(dct.get(x, 0.0), x) for x in universe]
+            # Lower score is better (we model prices), so sort ascending
+            items.sort(key=lambda t: t[0])
+            return [x for _score, x in items[: min(k, len(items))]]
+
+        top_dep = _topk(alpha, beam_k, deps_pool)
+        top_dest = _topk(beta, beam_k, dests_pool)
+        top_dates = _topk(gamma, beam_k, dates_pool)
+
+        # Beam search combinations and score with additive surrogate
+        heap = []
+        for d in top_dep:
+            a_score = alpha.get(d, 0.0)
+            for b in top_dest:
+                b_score = beta.get(b, 0.0)
+                # choose a small set of durations for each (d,b)
+                for dd in top_dates:
+                    g_score = gamma.get(dd, 0.0)
+                    # choose 2 representative durations: min and median to diversify
+                    if not durations:
+                        dur_list = [0]
+                    else:
+                        durs_sorted = sorted(set(int(x) for x in durations))
+                        mid = durs_sorted[len(durs_sorted) // 2]
+                        dur_list = [durs_sorted[0], mid] if len(durs_sorted) > 1 else [durs_sorted[0]]
+                    for dur in dur_list:
+                        rd = _ret_date(dd, dur)
+                        key = self._archive_key(d, b, dd, rd)
+                        if key in stats:
+                            # already in TS set; skip to avoid duplication
+                            continue
+                        score = a_score + b_score + g_score
+                        heapq.heappush(heap, (score, (d, b, dd, rd)))
+
+        q_sur = int(q * 0.3)
+        surrogate_pick = []
+        while heap and len(surrogate_pick) < q_sur:
+            _s, cand = heapq.heappop(heap)
+            surrogate_pick.append(cand)
+
+        picked.extend(surrogate_pick)
+
+        # 3) Random floor
+        q_rand = max(1, int(q * random_floor_frac))
+        rng = random.Random()
+        rand_added = 0
+        tries = 0
+        # precompute dates x durations into return dates
+        dd_all = list(dates_pool)
+        while rand_added < q_rand and tries < q_rand * 20:
+            tries += 1
+            if not deps_pool or not dests_pool or not dd_all or not durations:
+                break
+            d = rng.choice(deps_pool)
+            b = rng.choice(dests_pool)
+            dd = rng.choice(dd_all)
+            dur = rng.choice(durations)
+            rd = _ret_date(dd, dur)
+            cand = (d, b, dd, rd)
+            if cand not in picked:
+                picked.append(cand)
+                rand_added += 1
+
+        # Deduplicate and cap to q
+        seen = set()
+        out = []
+        for dep, dest, dd, rd in picked:
+            tup = (dep, dest, dd, rd)
+            if tup in seen:
+                continue
+            seen.add(tup)
+            out.append(tup)
+            if len(out) >= q:
+                break
+        return out
+
+
+
+    def _show_ts_archive_popup(self, event=None):
+        """
+        Open a simple, non-technical popup that explains what has been learned so far.
+
+        The popup shows:
+          - A short help text in plain English.
+          - A small chart of "how many trip options were updated each day".
+          - The current "Top departures", "Top destinations", and "Top departure dates"
+            ranked by their typical recent price (lower is better).
+          - The "Top trip options" (route + dates) by typical recent price.
+
+        Notes:
+          - "Typical recent price" means the system averages prices while giving more
+            importance to recent checks. This helps follow changing prices.
+          - "Number of recent checks" is how many times we recently looked at that
+            item (also weighted to favor recent checks).
+          - "Price spread" is how much the price tends to bounce around: smaller
+            means more stable, larger means more variable.
+        """
+        import json
+        import os
+        from collections import defaultdict
+        from datetime import datetime as _dt
+        import tkinter as _tk
+        from tkinter import ttk as _ttk
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        # Load archive from disk
+        arch_path = self._archive_path()
+        if not os.path.exists(arch_path):
+            _tk.messagebox.showinfo(
+                "Learning Overview",
+                "No data yet. Let the monitor run a bit, then try again."
+            )
+            return
+
+        try:
+            with open(arch_path, "r", encoding="utf-8") as fh:
+                arch = json.load(fh)
+        except Exception:
+            _tk.messagebox.showerror(
+                "Learning Overview",
+                "Could not read the learning file (ts_archive.json)."
+            )
+            return
+
+        stats = arch.get("stats", {})
+        forget_rate = arch.get("gamma", 0.98)  # closer to 1.0 = slower forgetting
+
+        # Aggregate helpful summaries (weighted by "recent checks")
+        dep_scores = defaultdict(list)
+        dest_scores = defaultdict(list)
+        date_scores = defaultdict(list)
+        updates_per_day = defaultdict(int)
+
+        for key, s in stats.items():
+            try:
+                dep, dest, dd, _rd = key.split("|")
+            except ValueError:
+                continue
+
+            typical = float(s.get("mu", 0.0))      # typical recent price estimate
+            checks = float(s.get("n", 0.0))        # recent checks weight
+            spread = float(s.get("var", 0.0))      # price variability estimate
+
+            dep_scores[dep].append((typical, checks))
+            dest_scores[dest].append((typical, checks))
+            date_scores[dd].append((typical, checks))
+
+            last = s.get("last_date")
+            if isinstance(last, str):
+                updates_per_day[last] += 1
+
+        def _reduce(bucket):
+            # Compute weighted average "typical recent price" per item
+            out = []
+            for k, lst in bucket.items():
+                wsum = sum(n for _mu, n in lst)
+                avg = (sum(mu * n for mu, n in lst) / wsum) if wsum > 0 else 0.0
+                out.append((avg, wsum, k))
+            out.sort(key=lambda t: t[0])  # lower is better
+            return out
+
+        dep_top = _reduce(dep_scores)[:10]
+        dest_top = _reduce(dest_scores)[:10]
+        date_top = _reduce(date_scores)[:10]
+
+        # Build list of top trip options (by typical recent price)
+        trips = []
+        for key, s in stats.items():
+            typical = float(s.get("mu", 0.0))
+            checks = float(s.get("n", 0.0))
+            spread = float(s.get("var", 0.0))
+            trips.append((typical, checks, spread, key))
+        trips.sort(key=lambda t: t[0])
+        trips_top = trips[:20]
+
+        # Create popup
+        win = _tk.Toplevel(self)
+        win.title("Learning Overview (press F12 to open)")
+        win.geometry("980x760")
+        win.transient(self)
+        win.grab_set()
+
+        # Header with plain-language help
+        header = _tk.LabelFrame(win, text="What you are seeing")
+        header.pack(fill="x", padx=10, pady=8)
+
+        help_txt = (
+            "This page shows how the app learns which routes and dates look promising.\n"
+            "- Typical recent price: an average that gives more weight to recent checks.\n"
+            "- Number of recent checks: how many times we looked at it recently.\n"
+            "- Price spread: how much it tends to vary (smaller = more stable).\n"
+            "Nothing is ever fully discarded: the app still tries new options regularly."
+        )
+        _tk.Label(header, text=help_txt, justify="left").pack(anchor="w", padx=8, pady=6)
+
+        # Archive summary line
+        summary = _tk.Frame(win)
+        summary.pack(fill="x", padx=10, pady=(0, 8))
+        _tk.Label(
+            summary,
+            text=f"Saved options: {len(stats)}    Forgetting speed: {forget_rate} (closer to 1.0 = slower)"
+        ).pack(anchor="w")
+
+        # Plot updates per day
+        plot_frame = _tk.LabelFrame(win, text="How many options were updated each day")
+        plot_frame.pack(fill="both", padx=10, pady=(0, 10), expand=False)
+
+        if updates_per_day:
+            try:
+                days_sorted = sorted(updates_per_day.keys())
+                xs = [_dt.strptime(d, "%Y-%m-%d") for d in days_sorted]
+                ys = [updates_per_day[d] for d in days_sorted]
+
+                fig = Figure(figsize=(7.5, 2.6), dpi=100)
+                ax = fig.add_subplot(111)
+                ax.plot_date(xs, ys, "-o")
+                ax.set_xlabel("Day")
+                ax.set_ylabel("Options updated")
+                fig.autofmt_xdate()
+
+                canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+                canvas.draw()
+                canvas.get_tk_widget().pack(fill="x", padx=8, pady=6)
+            except Exception:
+                _tk.Label(plot_frame, text="Chart could not be drawn.").pack(padx=10, pady=8)
+        else:
+            _tk.Label(plot_frame, text="No updates recorded yet.").pack(padx=10, pady=8)
+
+        # Paned area for tables
+        paned = _ttk.Panedwindow(win, orient="vertical")
+        paned.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        # Factors table (departures, destinations, dates)
+        fac_frame = _tk.LabelFrame(paned, text="Good places and dates (ranked by typical recent price)")
+        paned.add(fac_frame, weight=1)
+
+        cols = ("typical_price", "recent_checks", "code_or_date", "type")
+        tree = _ttk.Treeview(fac_frame, columns=cols, show="headings", height=10)
+        headings = (
+            "Typical recent price (EUR)",
+            "Number of recent checks",
+            "Code or date",
+            "Category",
+        )
+        for c, h in zip(cols, headings):
+            tree.heading(c, text=h)
+            tree.column(c, width=190 if c == "typical_price" else 160, anchor="center")
+        tree.pack(fill="both", expand=True, padx=6, pady=6)
+
+        def _fmt_eur(x):
+            try:
+                return f"{float(x):.2f}"
+            except Exception:
+                return str(x)
+
+        for avg, n, code in dep_top:
+            tree.insert("", "end", values=(_fmt_eur(avg), f"{n:.2f}", code, "Departure"))
+        for avg, n, code in dest_top:
+            tree.insert("", "end", values=(_fmt_eur(avg), f"{n:.2f}", code, "Destination"))
+        for avg, n, code in date_top:
+            tree.insert("", "end", values=(_fmt_eur(avg), f"{n:.2f}", code, "Departure date"))
+
+        # Trips table (top specific options)
+        trips_frame = _tk.LabelFrame(paned, text="Top trip options by typical recent price")
+        paned.add(trips_frame, weight=2)
+
+        a_cols = ("typical_price", "recent_checks", "price_spread", "from", "to", "dep_date", "ret_date")
+        a_tree = _ttk.Treeview(trips_frame, columns=a_cols, show="headings", height=12)
+
+        a_headings = (
+            "Typical recent price (EUR)",
+            "Number of recent checks",
+            "Price spread",
+            "From",
+            "To",
+            "Departure",
+            "Return",
+        )
+        for c, h in zip(a_cols, a_headings):
+            a_tree.heading(c, text=h)
+            a_tree.column(c, width=170 if c in ("typical_price", "recent_checks", "price_spread") else 120, anchor="center")
+        a_tree.pack(fill="both", expand=True, padx=6, pady=6)
+
+        for typical, checks, spread, key in trips_top:
+            try:
+                dep, dest, dd, rd = key.split("|")
+            except ValueError:
+                dep = dest = dd = rd = "?"
+            a_tree.insert(
+                "",
+                "end",
+                values=(
+                    _fmt_eur(typical),
+                    f"{checks:.2f}",
+                    f"{spread:.4f}",
+                    dep,
+                    dest,
+                    dd,
+                    rd,
+                ),
+            )
+
+        # Close button
+        btn = _tk.Button(win, text="Close", command=win.destroy)
+        btn.pack(pady=8)
+
+
+    def _archive_bootstrap_from_records(self, arch: dict) -> None:
+        """
+        Retroactively and incrementally feed the Thompson/surrogate archive from
+        'flight_records.jsonl'. We process records in chronological order and
+        update per-arm stats using the record's calendar day as the observation
+        date (enables discounted forgetting over time).
+
+        The method is incremental: it remembers the last processed timestamp
+        ('last_bootstrap_ts') and only ingests newer records on subsequent calls.
+
+        Notes
+        -----
+        - An arm key is DEP|DEST|dep_date|arrival_date. Records missing either
+          dep_date or arrival_date are skipped.
+        - Timestamp field may be 'datetime' (YYYY-MM-DD-HH) or 'date' (YYYY-MM-DD).
+        - Price must parse to float and be positive.
+        """
+        import json
+        import os
+        from datetime import datetime as _dt
+
+        path = getattr(self.record_mgr, "path", "flight_records.jsonl")
+        if not os.path.exists(path):
+            return
+
+        # Load last processed timestamp (string comparable due to fixed formatting).
+        last_ts = arch.get("last_bootstrap_ts", "")
+
+        # Collect eligible rows
+        rows: list[tuple[str, str, str, str, str, float]] = []
+        # tuple: (ts_iso, dep, dest, dep_date, arrival_date, price)
+
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                ts_str = rec.get("datetime") or rec.get("date")
+                if not ts_str:
+                    continue
+
+                # Normalize timestamp string to YYYY-MM-DD-HH for ordering
+                # If only a date is present, use hour "00".
+                try:
+                    if len(ts_str.split("-")) == 4:
+                        # Already YYYY-MM-DD-HH
+                        ts_norm = ts_str
+                    else:
+                        # Parse as date, reformat with HH=00
+                        t = _dt.strptime(ts_str, "%Y-%m-%d")
+                        ts_norm = t.strftime("%Y-%m-%d-00")
+                except Exception:
+                    continue
+
+                # Incremental ingestion: only newer than last_ts
+                if last_ts and not (ts_norm > last_ts):
+                    continue
+
+                dep = rec.get("departure")
+                dest = rec.get("destination")
+                dd = rec.get("dep_date")
+                rd = rec.get("arrival_date")
+                price = rec.get("price", None)
+
+                if not (dep and dest and dd and rd):
+                    continue
+                try:
+                    price_f = float(price)
+                    if not (price_f > 0.0):
+                        continue
+                except Exception:
+                    continue
+
+                rows.append((ts_norm, dep, dest, dd, rd, price_f))
+
+        if not rows:
+            return
+
+        # Sort by timestamp ascending for correct day-wise discounting behavior
+        rows.sort(key=lambda r: r[0])
+
+        # Feed archive one by one, using the record's calendar day as the update day
+        for ts_norm, dep, dest, dd, rd, price_f in rows:
+            # Extract the calendar day "YYYY-MM-DD" from normalized ts
+            day = ts_norm[:10]
+            key = self._archive_key(dep, dest, dd, rd)
+            # Update the archive with the observation at 'day'
+            self._archive_add_observation(arch, key, price_f, day)
+
+        # Remember the last processed timestamp
+        arch["last_bootstrap_ts"] = rows[-1][0]
+    def _records_last_day(self) -> str | None:
+        """
+        Return the last calendar day 'YYYY-MM-DD' present in flight_records.jsonl,
+        or None if unavailable. Safe utility, not required by the bootstrap.
+        """
+        import json
+        import os
+        from datetime import datetime as _dt
+
+        path = getattr(self.record_mgr, "path", "flight_records.jsonl")
+        if not os.path.exists(path):
+            return None
+
+        last_day = None
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                    ts_str = rec.get("datetime") or rec.get("date")
+                    if not ts_str:
+                        continue
+                    # Normalize to date
+                    if len(ts_str.split("-")) == 4:
+                        day = ts_str[:10]
+                    else:
+                        _dt.strptime(ts_str, "%Y-%m-%d")  # validate
+                        day = ts_str
+                    last_day = day
+                except Exception:
+                    continue
+        return last_day
 
 
 if __name__ == "__main__":
