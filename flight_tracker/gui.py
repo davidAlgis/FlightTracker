@@ -127,6 +127,8 @@ class FlightBotGUI(tk.Tk):
             ("Return Date (YYYY-MM-DD)", "arrival_date", False),
             ("Trip Duration (days) (e.g. 7 or 25-35)", "trip_duration", False),
             ("Max Flight Duration (h)", "max_duration_flight", False),
+            # NEW: comma-separated airline names to exclude (substring match)
+            ("Exclude airlines (comma-separated names)", "exclude_airlines", False),
         ]
 
         self.entries = {}
@@ -150,6 +152,7 @@ class FlightBotGUI(tk.Tk):
             row=len(fields), column=0, columnspan=2, pady=10
         )
         self.config_frame = frame
+
 
     def _create_result_frame(self) -> None:
         """Create the right-hand panel with historic-best info and an interactive graph."""
@@ -455,7 +458,6 @@ class FlightBotGUI(tk.Tk):
         deps = self.resolved_airports.get("departure", [])
         dests = self.resolved_airports.get("destination", [])
 
-        # Validate departure date
         try:
             dep_dt = self._parse_date_single(
                 self._get_widget_value(self.entries["dep_date"])
@@ -468,7 +470,6 @@ class FlightBotGUI(tk.Tk):
             self.cancel_button.config(state="disabled")
             return
 
-        # Validate return date only if provided
         arr_field_val = self._get_widget_value(self.entries["arrival_date"])
         arr_dt = None
         if arr_field_val:
@@ -487,7 +488,6 @@ class FlightBotGUI(tk.Tk):
 
         durations = None
         if random_mode:
-            # Trip duration is provided: parse and validate the date window length
             try:
                 durations = self._parse_durations(trip_str)
             except ValueError as e:
@@ -525,6 +525,10 @@ class FlightBotGUI(tk.Tk):
                 self.cancel_button.config(state="disabled")
                 return
 
+        # NEW: parse excluded airlines (comma-separated)
+        exclude_raw = self._get_widget_value(self.entries.get("exclude_airlines", ""))
+        exclude_list = [s.strip() for s in exclude_raw.split(",") if s.strip()]
+
         params = {
             "max_duration_flight": float(
                 self._get_widget_value(self.entries["max_duration_flight"])
@@ -533,16 +537,15 @@ class FlightBotGUI(tk.Tk):
             "window_start": dep_dt,
             "window_end": arr_dt if arr_dt else dep_dt,
             "durations": durations,
+            "exclude_airlines": exclude_list,  # NEW
         }
 
-        # Save config (store entered strings and resolved codes)
         cfg = {k: self._get_widget_value(w) for k, w in self.entries.items()}
         cfg["departure_codes"] = deps
         cfg["destination_codes"] = dests
         cfg["max_duration_flight"] = params["max_duration_flight"]
         self.config_mgr.save(cfg)
 
-        # Exhaustive mode keeps the single pair; random mode uses None sentinel
         if random_mode:
             pairs = None
         else:
@@ -559,6 +562,7 @@ class FlightBotGUI(tk.Tk):
             daemon=True,
         )
         self._monitor_thread.start()
+
 
     def _get_global_best_price(self):
         """Return the best price ever recorded, or None if no records."""
@@ -656,6 +660,7 @@ class FlightBotGUI(tk.Tk):
                             arrival_date=rd,
                             max_duration_flight=params["max_duration_flight"],
                             cancel_event=self._stop_event,
+                            excluded_airlines=params.get("exclude_airlines", []),
                         )
                         self._current_bot = bot
 
@@ -1150,10 +1155,14 @@ class FlightBotGUI(tk.Tk):
         Hover handler: when the mouse is near a plotted point, show an annotation
         bubble with the BEST flight of that calendar day (min price) and details.
         Now also displays the trip dates (dep_date -> arrival_date) when available.
+
+        Improved: the tooltip bubble automatically chooses an offset and alignment
+        so it is less likely to be cropped by the window edges.
         """
         import matplotlib.dates as mdates
         import numpy as np
 
+        # If the mouse is not over our axes or we have no plotted line yet, hide.
         if not hasattr(self, "_line") or event.inaxes is not self.ax:
             if self._point_annotation.get_visible():
                 self._point_annotation.set_visible(False)
@@ -1175,13 +1184,12 @@ class FlightBotGUI(tk.Tk):
                 except Exception:
                     try:
                         return mdates.date2num(
-                            np.datetime64(x)
-                            .astype("datetime64[ns]")
-                            .astype(object)
+                            np.datetime64(x).astype("datetime64[ns]").astype(object)
                         )
                     except Exception:
                         return None
 
+        # Find nearest plotted point in pixel distance
         threshold_px = 8
         min_dist2 = (threshold_px + 1) ** 2
         nearest_idx = None
@@ -1194,14 +1202,12 @@ class FlightBotGUI(tk.Tk):
                 yn = float(ydata[i])
             except Exception:
                 continue
-            px_py = self.ax.transData.transform(
-                np.array([xn, yn], dtype=float)
-            )
-            px, py = (
-                (px_py[0], px_py[1])
-                if px_py.ndim == 1
-                else (px_py[0, 0], px_py[0, 1])
-            )
+            # Data -> display pixels
+            px_py = self.ax.transData.transform(np.array([xn, yn], dtype=float))
+            if px_py.ndim == 1:
+                px, py = float(px_py[0]), float(px_py[1])
+            else:
+                px, py = float(px_py[0, 0]), float(px_py[0, 1])
 
             dx = px - event.x
             dy = py - event.y
@@ -1209,7 +1215,9 @@ class FlightBotGUI(tk.Tk):
             if d2 < min_dist2:
                 min_dist2 = d2
                 nearest_idx = i
+                nearest_px, nearest_py = px, py  # keep display coords
 
+        # If no nearby point, hide the tooltip
         if nearest_idx is None:
             if self._point_annotation.get_visible():
                 self._point_annotation.set_visible(False)
@@ -1217,16 +1225,9 @@ class FlightBotGUI(tk.Tk):
                 self.canvas.draw_idle()
             return
 
-        day_key = (
-            self._plot_days[nearest_idx]
-            if hasattr(self, "_plot_days")
-            else None
-        )
-        best = (
-            self._daily_best.get(day_key, {})
-            if hasattr(self, "_daily_best")
-            else {}
-        )
+        # Build the info text, using your existing daily-best mapping
+        day_key = self._plot_days[nearest_idx] if hasattr(self, "_plot_days") else None
+        best = self._daily_best.get(day_key, {}) if hasattr(self, "_daily_best") else {}
 
         if best:
             dd = best.get("dep_date")
@@ -1247,9 +1248,11 @@ class FlightBotGUI(tk.Tk):
                 (dep, dest, dd, rd) if (dep and dest and dd and rd) else None
             )
         else:
-            ts_str = mdates.num2date(_x_to_num(xdata[nearest_idx])).strftime(
-                "%Y-%m-%d %H:%M"
-            )
+            xn = _x_to_num(xdata[nearest_idx])
+            try:
+                ts_str = mdates.num2date(xn).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                ts_str = ""
             try:
                 y_val = float(ydata[nearest_idx])
             except Exception:
@@ -1257,9 +1260,22 @@ class FlightBotGUI(tk.Tk):
             text = f"{ts_str}\nEUR {y_val:.2f}"
             self._annotation_link = None
 
-        self._point_annotation.xy = (xdata[nearest_idx], ydata[nearest_idx])
+        # Data coordinates of the point to annotate
+        x_pt = xdata[nearest_idx]
+        y_pt = ydata[nearest_idx]
+
+        # Choose a safe offset and alignment based on pixel position inside the axes
+        xytext, ha, va = self._choose_annotation_offset(nearest_px, nearest_py)
+
+        # Apply annotation properties and show it
+        self._point_annotation.xy = (x_pt, y_pt)
         self._point_annotation.set_text(text)
         self._point_annotation.set_visible(True)
+        self._point_annotation.set_ha(ha)
+        self._point_annotation.set_va(va)
+        self._point_annotation.set_position(xytext)  # same as set_xytext
+        # Keep an arrow; properties already set when created
+
         self.canvas.draw_idle()
 
     def _on_pick(self, event) -> None:
@@ -2408,6 +2424,70 @@ class FlightBotGUI(tk.Tk):
                 except Exception:
                     continue
         return last_day
+
+    def _choose_annotation_offset(self, px: float, py: float) -> tuple[tuple[int, int], str, str]:
+        """
+        Choose a tooltip offset and text alignment so the annotation bubble is less
+        likely to be cropped by the window.
+
+        We do this heuristically using the mouse position (in display pixels) and
+        the axes bounding box. Near the right edge we prefer a leftward offset, near
+        the top we prefer a downward offset, etc.
+
+        Returns:
+            (xytext_offset, ha, va)
+            - xytext_offset: (dx, dy) in pixels for Annotation.xytext
+            - ha: 'left' or 'right'
+            - va: 'bottom' or 'top'
+        """
+        # Axes bbox in display coords
+        axbb = self.ax.get_window_extent()
+        x0, y0 = axbb.x0, axbb.y0
+        x1, y1 = axbb.x1, axbb.y1
+        w = max(1.0, x1 - x0)
+        h = max(1.0, y1 - y0)
+
+        # Three horizontal and vertical zones
+        left_zone = x0 + 0.33 * w
+        right_zone = x0 + 0.66 * w
+        low_zone = y0 + 0.33 * h
+        high_zone = y0 + 0.66 * h
+
+        # Default offsets (pointing to top-right of the data point)
+        dx, dy = 10, 10
+        ha, va = "left", "bottom"
+
+        # Horizontal choice
+        if px >= right_zone:
+            # Too close to right edge: place bubble to the left
+            dx = -10
+            ha = "right"
+        elif px <= left_zone:
+            # Comfortable on the left: keep bubble to the right
+            dx = 10
+            ha = "left"
+        else:
+            # Middle band: prefer right
+            dx = 10
+            ha = "left"
+
+        # Vertical choice
+        if py >= high_zone:
+            # Near top: place bubble below the point
+            dy = -10
+            va = "top"
+        elif py <= low_zone:
+            # Near bottom: place bubble above the point
+            dy = 10
+            va = "bottom"
+        else:
+            # Middle band: prefer above
+            dy = 10
+            va = "bottom"
+
+        return (dx, dy), ha, va
+
+
 
 
 if __name__ == "__main__":

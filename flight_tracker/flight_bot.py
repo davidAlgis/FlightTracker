@@ -42,6 +42,7 @@ class FlightBot:
         max_duration_flight: float,
         driver_path: str = None,
         cancel_event=None,
+        excluded_airlines: list[str] | None = None,
     ):
         """
         :param departure: IATA code of departure airport
@@ -51,6 +52,8 @@ class FlightBot:
         :param max_duration_flight: maximum allowed duration in hours
         :param driver_path: optional geckodriver path
         :param cancel_event: optional threading.Event for cooperative cancel
+        :param excluded_airlines: optional list of airline names to exclude
+                                  (case-insensitive substring match, e.g. ["china eastern"])
         """
         self.departure = departure
         self.destination = destination
@@ -66,6 +69,13 @@ class FlightBot:
         self.notifier = ToastNotifier()
         self.cancel_event = cancel_event
         self._driver: Optional[webdriver.Firefox] = None
+
+        # Excluded airlines normalized to lowercase for substring checks
+        self._excluded_airlines = [
+            s.strip().lower()
+            for s in (excluded_airlines or [])
+            if s and s.strip()
+        ]
 
     # ------------------------------------------------------------------ #
     # Cancellation helpers
@@ -158,8 +168,8 @@ class FlightBot:
         Scrape each result's price, airline, and durations; return the cheapest dict.
 
         Offline-safe:
-        - If a network/navigation error occurs (e.g., DNS not found), mark the run
-          as offline and return None without raising.
+        - If a network/navigation error occurs, mark the run as offline and return None.
+        - Excludes any airline whose name contains one of the user-provided substrings.
         """
         from selenium.common.exceptions import (TimeoutException,
                                                 WebDriverException)
@@ -179,7 +189,6 @@ class FlightBot:
                 else webdriver.Firefox(options=options)
             )
         except WebDriverException:
-            # Driver could not start (rare); treat as offline-ish failure
             self._driver = None
             self._offline = True
             return None  # type: ignore
@@ -202,7 +211,6 @@ class FlightBot:
                 except Exception:
                     pass
             except WebDriverException:
-                # E.g., about:neterror dnsNotFound when offline
                 self._offline = True
                 self._quit_driver()
                 return None  # type: ignore
@@ -212,7 +220,6 @@ class FlightBot:
                 self._quit_driver()
                 return None  # type: ignore
 
-            # Poll briefly for content (cancellable)
             for _ in range(32):
                 if self._is_cancelled():
                     self._quit_driver()
@@ -232,7 +239,6 @@ class FlightBot:
         if self._is_cancelled():
             return None  # type: ignore
         if not html:
-            # No DOM fetched; if we did not explicitly mark offline, just no result
             return None  # type: ignore
 
         soup = BeautifulSoup(html, "html.parser")
@@ -245,6 +251,12 @@ class FlightBot:
 
             comp = result.find("div", class_="J0g6-operator-text")
             company = comp.get_text(strip=True) if comp else ""
+
+            # Exclusion by case-insensitive substring
+            if self._excluded_airlines:
+                lc = company.lower()
+                if any(excl in lc for excl in self._excluded_airlines):
+                    continue
 
             pdiv = result.find("div", class_="e2GB-price-text")
             txt = pdiv.get_text().strip() if pdiv else ""
