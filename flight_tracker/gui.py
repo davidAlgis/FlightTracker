@@ -127,8 +127,11 @@ class FlightBotGUI(tk.Tk):
             ("Return Date (YYYY-MM-DD)", "arrival_date", False),
             ("Trip Duration (days) (e.g. 7 or 25-35)", "trip_duration", False),
             ("Max Flight Duration (h)", "max_duration_flight", False),
-            # NEW: comma-separated airline names to exclude (substring match)
+            # Existing: comma-separated airline names to exclude (substring match)
             ("Exclude airlines (comma-separated names)", "exclude_airlines", False),
+            # Updated format hint: single dash between the two dates
+            ("Forbidden intervals (YYYY-MM-DD-YYYY-MM-DD, comma-separated)",
+             "forbidden_intervals", False),
         ]
 
         self.entries = {}
@@ -458,6 +461,7 @@ class FlightBotGUI(tk.Tk):
         deps = self.resolved_airports.get("departure", [])
         dests = self.resolved_airports.get("destination", [])
 
+        # Validate departure date
         try:
             dep_dt = self._parse_date_single(
                 self._get_widget_value(self.entries["dep_date"])
@@ -470,6 +474,7 @@ class FlightBotGUI(tk.Tk):
             self.cancel_button.config(state="disabled")
             return
 
+        # Validate return date only if provided
         arr_field_val = self._get_widget_value(self.entries["arrival_date"])
         arr_dt = None
         if arr_field_val:
@@ -488,6 +493,7 @@ class FlightBotGUI(tk.Tk):
 
         durations = None
         if random_mode:
+            # Trip duration is provided: parse and validate the date window length
             try:
                 durations = self._parse_durations(trip_str)
             except ValueError as e:
@@ -525,9 +531,21 @@ class FlightBotGUI(tk.Tk):
                 self.cancel_button.config(state="disabled")
                 return
 
-        # NEW: parse excluded airlines (comma-separated)
+        # Existing: excluded airlines comma-separated
         exclude_raw = self._get_widget_value(self.entries.get("exclude_airlines", ""))
         exclude_list = [s.strip() for s in exclude_raw.split(",") if s.strip()]
+
+        # NEW: forbidden intervals parsing
+        forb_raw = self._get_widget_value(self.entries.get("forbidden_intervals", ""))
+        try:
+            forbidden = self._parse_forbidden_intervals(forb_raw)
+        except ValueError as e:
+            messagebox.showerror("Forbidden Intervals", str(e))
+            self.progress.stop()
+            self.status_label.config(text="Status: idle")
+            self.start_button.config(state="normal")
+            self.cancel_button.config(state="disabled")
+            return
 
         params = {
             "max_duration_flight": float(
@@ -537,15 +555,19 @@ class FlightBotGUI(tk.Tk):
             "window_start": dep_dt,
             "window_end": arr_dt if arr_dt else dep_dt,
             "durations": durations,
-            "exclude_airlines": exclude_list,  # NEW
+            "exclude_airlines": exclude_list,
+            # NEW: list of (start_date, end_date) as datetime objects, inclusive
+            "forbidden_intervals": forbidden,
         }
 
+        # Save config (store entered strings and resolved codes)
         cfg = {k: self._get_widget_value(w) for k, w in self.entries.items()}
         cfg["departure_codes"] = deps
         cfg["destination_codes"] = dests
         cfg["max_duration_flight"] = params["max_duration_flight"]
         self.config_mgr.save(cfg)
 
+        # Exhaustive mode keeps the single pair; random mode uses None sentinel
         if random_mode:
             pairs = None
         else:
@@ -587,6 +609,9 @@ class FlightBotGUI(tk.Tk):
         Random mode uses Discounted Thompson Sampling + Additive Surrogate to
         propose candidates in small daily batches. Archive forgets exponentially
         across days and is retroactively bootstrapped from flight_records.jsonl.
+
+        Now also skips any candidate whose [dep_date, ret_date] overlaps a
+        user-specified forbidden interval.
         """
         from datetime import datetime
 
@@ -603,12 +628,30 @@ class FlightBotGUI(tk.Tk):
         # TS/surrogate archive (persistent)
         arch = self._archive_load()
 
-        # NEW: retroactive, incremental bootstrap from existing JSONL
+        # Retroactive, incremental bootstrap from existing JSONL
         self._archive_bootstrap_from_records(arch)
 
         today_str = datetime.now().strftime("%Y-%m-%d")
         self._archive_decay(arch, today_str)
         self._archive_save(arch)
+
+        # NEW: forbidden intervals list of tuples (dt_start, dt_end), inclusive
+        forbidden = params.get("forbidden_intervals", [])
+
+        def _overlaps_forbidden(dd_str: str, rd_str: str) -> bool:
+            """Return True if the inclusive trip range overlaps any forbidden interval."""
+            try:
+                dd = datetime.strptime(dd_str, "%Y-%m-%d")
+                rd = datetime.strptime(rd_str, "%Y-%m-%d")
+            except Exception:
+                return False
+            if rd < dd:
+                dd, rd = rd, dd
+            for f0, f1 in forbidden:
+                # Inclusive overlap: not (trip before interval or after interval)
+                if not (rd < f0 or dd > f1):
+                    return True
+            return False
 
         try:
             while not self._stop_event.is_set():
@@ -645,6 +688,13 @@ class FlightBotGUI(tk.Tk):
                         random_floor_frac=0.10,
                         beam_k=20,
                     )
+
+                    # NEW: filter out proposals overlapping forbidden intervals
+                    proposals = [
+                        (dep, dest, dd, rd)
+                        for (dep, dest, dd, rd) in proposals
+                        if not _overlaps_forbidden(dd, rd)
+                    ]
 
                     for dep, dest, dd, rd in proposals:
                         if self._stop_event.is_set():
@@ -747,6 +797,11 @@ class FlightBotGUI(tk.Tk):
                         for dd, rd in dep_ret_pairs:
                             if self._stop_event.is_set():
                                 break
+
+                            # NEW: skip if trip overlaps forbidden intervals
+                            if _overlaps_forbidden(dd, rd):
+                                continue
+
                             self.status_label.config(
                                 text=f"Checking {dep}->{dest} on {dd} -> {rd}"
                             )
@@ -759,6 +814,7 @@ class FlightBotGUI(tk.Tk):
                                     "max_duration_flight"
                                 ],
                                 cancel_event=self._stop_event,
+                                excluded_airlines=params.get("exclude_airlines", []),
                             )
                             self._current_bot = bot
                             prev_best = self._get_global_best_price()
@@ -2486,6 +2542,50 @@ class FlightBotGUI(tk.Tk):
             va = "bottom"
 
         return (dx, dy), ha, va
+
+    def _parse_forbidden_intervals(self, s: str) -> list[tuple[datetime, datetime]]:
+        """
+        Parse a comma-separated list of inclusive date intervals into datetime tuples.
+
+        Input format:
+          YYYY-MM-DD-YYYY-MM-DD[, YYYY-MM-DD-YYYY-MM-DD, ...]
+
+        Rules:
+          - Whitespace is ignored around items.
+          - Each item must be exactly two YYYY-MM-DD dates separated by a single dash.
+            Example: 2025-12-20-2025-12-27
+          - Start and end must be valid calendar dates.
+          - If end < start, they are swapped.
+          - Returns a list of (start_dt, end_dt), inclusive.
+
+        Raises:
+          ValueError on malformed entries.
+        """
+        s = (s or "").strip()
+        if not s:
+            return []
+
+        out: list[tuple[datetime, datetime]] = []
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        # Regex captures two dates separated by a single dash between them
+        pat = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})-(\d{4}-\d{2}-\d{2})\s*$")
+
+        for part in parts:
+            m = pat.match(part)
+            if not m:
+                raise ValueError(
+                    f"Invalid interval '{part}'. Use YYYY-MM-DD-YYYY-MM-DD."
+                )
+            a, b = m.group(1), m.group(2)
+            try:
+                dt_a = datetime.strptime(a, "%Y-%m-%d")
+                dt_b = datetime.strptime(b, "%Y-%m-%d")
+            except ValueError as e:
+                raise ValueError(f"Invalid date in '{part}': {e}") from e
+            if dt_b < dt_a:
+                dt_a, dt_b = dt_b, dt_a
+            out.append((dt_a, dt_b))
+        return out
 
 
 
