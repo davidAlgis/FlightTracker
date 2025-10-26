@@ -58,6 +58,10 @@ def _ensure_tomllib(pip_bin: Path):
     except ModuleNotFoundError:
         subprocess.check_call([pip_bin, "install", "tomli"])
         import tomli as tomllib  # type: ignore
+
+        print(
+            "There might be an error here, in this case remove env and build folder and restart setup"
+        )
     return tomllib  # pyright: ignore[reportGeneralTypeIssues]
 
 
