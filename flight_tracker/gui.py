@@ -351,53 +351,51 @@ class FlightBotGUI(tk.Tk):
     def _load_airport_names(self):
         """
         Load IATA->airport-name map from OurAirports CSV.
-
-        If the download fails (e.g., no internet), do not crash:
-        - keep an empty map so the GUI stays usable,
-        - update the status label softly,
-        - schedule a retry in 60 seconds via Tkinter after().
-        Any pending retry is canceled once loading succeeds.
+        If the download fails (e.g., no internet or SSL error), use a local fallback or retry.
         """
         import urllib.error
-
+        import ssl
         retry_ms = 60_000  # 1 minute
 
+        # Try to load from URL, with SSL context to handle verification
         try:
+            context = ssl._create_unverified_context()
             df = pd.read_csv(AirportFromDistance.AIRPORTS_URL)
-        except Exception:
-            # Ensure the map exists, even if empty
-            if not hasattr(self, "code_to_name") or self.code_to_name is None:
-                self.code_to_name = {}
-
-            # Soft status hint; ignore if status_label not ready yet
-            try:
-                self.status_label.config(
-                    text="Status: offline, retrying in 1 min"
-                )
-            except Exception:
-                pass
-
-            # Schedule a single retry if none is pending
-            def _retry():
-                self._airport_retry_id = None
-                self._load_airport_names()
-
-            if (
-                not hasattr(self, "_airport_retry_id")
-                or self._airport_retry_id is None
-            ):
+        except (urllib.error.URLError, ssl.SSLCertVerificationError) as e:
+            # Try to load from local file if available
+            local_path = self._asset_path("airports.csv")
+            if os.path.exists(local_path):
+                df = pd.read_csv(local_path)
+            else:
+                # Ensure the map exists, even if empty
+                if not hasattr(self, "code_to_name") or self.code_to_name is None:
+                    self.code_to_name = {}
+                # Soft status hint; ignore if status_label not ready yet
                 try:
-                    self._airport_retry_id = self.after(retry_ms, _retry)
+                    self.status_label.config(
+                        text="Status: offline, retrying in 1 min (SSL error)"
+                    )
                 except Exception:
-                    # If after() is not available yet, try again on next call path
+                    pass
+                # Schedule a single retry if none is pending
+                def _retry():
                     self._airport_retry_id = None
-            return
+                    self._load_airport_names()
+                if (
+                    not hasattr(self, "_airport_retry_id")
+                    or self._airport_retry_id is None
+                ):
+                    try:
+                        self._airport_retry_id = self.after(retry_ms, _retry)
+                    except Exception:
+                        # If after() is not available yet, try again on next call path
+                        self._airport_retry_id = None
+                return
 
         # Success path: build the code->name map
         self.code_to_name = {
             c: n for c, n in zip(df["iata_code"], df["name"]) if pd.notna(c)
         }
-
         # Cancel any pending retry now that data is loaded
         if (
             hasattr(self, "_airport_retry_id")
@@ -408,13 +406,11 @@ class FlightBotGUI(tk.Tk):
             except Exception:
                 pass
             self._airport_retry_id = None
-
         # Optional: refresh status
         try:
             self.status_label.config(text="Status: data loaded")
         except Exception:
             pass
-
     def _load_saved_config(self):
         """Restore last inputs and resolved codes from config.json."""
         saved = self.config_mgr.load()
@@ -504,7 +500,13 @@ class FlightBotGUI(tk.Tk):
         self.config_mgr.save(cfg)
 
     def _resolve_airports(self, txt):
-        """Convert comma-list or City/Country or Country to IATA codes."""
+        """
+        Convert comma-list or City/Country or Country to IATA codes.
+        Handle SSL errors gracefully.
+        """
+        import urllib.error
+        import ssl
+
         toks = [t.strip() for t in txt.split(",") if t.strip()]
         if all(len(t) == 3 and t.isalpha() and t.isupper() for t in toks):
             return toks
@@ -517,14 +519,19 @@ class FlightBotGUI(tk.Tk):
             )
             if dur is None:
                 raise ValueError("Cancelled")
-            return [
-                c
-                for c, _ in AirportFromDistance().get_airports(
-                    f"{city}, {country}", dur
-                )
-            ]
-        return [c for c, _ in CountryToAirport().get_airports(txt)]
-
+            try:
+                return [
+                    c
+                    for c, _ in AirportFromDistance().get_airports(
+                        f"{city}, {country}", dur
+                    )
+                ]
+            except (urllib.error.URLError, ssl.SSLCertVerificationError) as e:
+                raise ValueError(f"Could not resolve airports: {e}")
+        try:
+            return [c for c, _ in CountryToAirport().get_airports(txt)]
+        except (urllib.error.URLError, ssl.SSLCertVerificationError) as e:
+            raise ValueError(f"Could not resolve airports: {e}")
     def _on_start(self):
         """Start the background monitoring thread if not already running."""
         if not self._fields_complete():
