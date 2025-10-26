@@ -61,6 +61,7 @@ class FlightBotGUI(tk.Tk):
         self._create_config_frame()
         self._create_result_frame()
         self._create_status_panel()
+        self._create_menu()
         self._load_airport_names()
 
         # state and managers
@@ -98,6 +99,122 @@ class FlightBotGUI(tk.Tk):
 
         if self._allow_auto_start and self._fields_complete():
             self._on_start()
+
+    def _create_menu(self) -> None:
+        """
+        Create the main menu bar with:
+        - File: Browse (open executable folder), Exit (quit app)
+        - Monitoring: Reset historic (clear saved flight search records with confirm)
+        """
+        menubar = tk.Menu(self)
+
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Browse", command=self._browse_executable_location)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self._exit_app)
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        mon_menu = tk.Menu(menubar, tearoff=0)
+        mon_menu.add_command(label="Reset historic", command=self._reset_historic)
+        menubar.add_cascade(label="Monitoring", menu=mon_menu)
+
+        self.config(menu=menubar)
+
+    def _browse_executable_location(self) -> None:
+        """
+        Open a file explorer window at the folder of the running executable (frozen)
+        or the project root (script mode). Errors are surfaced to the user.
+        """
+        import sys
+        import subprocess
+
+        try:
+            if getattr(sys, "frozen", False):
+                target = os.path.dirname(sys.executable)
+            else:
+                # Project root (one level above this file, consistent with _asset_path)
+                target = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+            if os.name == "nt":
+                os.startfile(target)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", target])
+            else:
+                subprocess.Popen(["xdg-open", target])
+        except Exception:
+            messagebox.showerror("Browse failed", "Could not open the executable location.")
+
+    def _exit_app(self) -> None:
+        """
+        Fully exit the application, ensuring the tray icon is stopped before closing.
+        """
+        try:
+            if hasattr(self, "tray_icon") and self.tray_icon is not None:
+                try:
+                    self.tray_icon.stop()
+                except Exception:
+                    pass
+        finally:
+            # Destroy the Tk window; if mainloop is running, this cleanly exits.
+            try:
+                self.destroy()
+            except Exception:
+                pass
+            # As a last resort, terminate the process to avoid background threads lingering.
+            try:
+                import sys
+                sys.exit(0)
+            except Exception:
+                pass
+
+    def _reset_historic(self) -> None:
+        """
+        Ask for confirmation, then delete the historic search records file and
+        refresh the UI. Only the historic records are cleared (no other learning files).
+        """
+        proceed = messagebox.askyesno(
+            "Reset historic",
+            "This will permanently delete all saved flight search records.\n\n"
+            "Are you sure you want to continue?"
+        )
+        if not proceed:
+            return
+
+        # Remove records file if it exists
+        try:
+            path = getattr(self.record_mgr, "path", "flight_records.jsonl")
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            messagebox.showerror("Reset failed", "Could not delete the historic records file.")
+            return
+
+        # Clear in-memory bests and refresh panels/plot
+        try:
+            self.best_prices.clear()
+        except Exception:
+            pass
+
+        try:
+            self.historic_text.configure(state="normal")
+            self.historic_text.delete("1.0", END)
+            self.historic_text.insert(END, "Historic cleared.")
+            self.historic_text.configure(state="disabled")
+        except Exception:
+            pass
+
+        try:
+            self.ax.clear()
+            self.ax.set_xlabel("Monitoring timestamp")
+            self.ax.set_ylabel("Price (EUR)")
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+        messagebox.showinfo("Reset historic", "All historic search records have been cleared.")
+
+
+
 
     def _configure_grid(self):
         """Configure main window grid for two columns and two rows."""
