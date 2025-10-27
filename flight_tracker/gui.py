@@ -125,8 +125,8 @@ class FlightBotGUI(tk.Tk):
         Open a file explorer window at the folder of the running executable (frozen)
         or the project root (script mode). Errors are surfaced to the user.
         """
-        import sys
         import subprocess
+        import sys
 
         try:
             if getattr(sys, "frozen", False):
@@ -353,8 +353,8 @@ class FlightBotGUI(tk.Tk):
         Load IATA->airport-name map from OurAirports CSV.
         If the download fails (e.g., no internet or SSL error), use a local fallback or retry.
         """
-        import urllib.error
         import ssl
+        import urllib.error
         retry_ms = 60_000  # 1 minute
 
         # Try to load from URL, with SSL context to handle verification
@@ -411,6 +411,7 @@ class FlightBotGUI(tk.Tk):
             self.status_label.config(text="Status: data loaded")
         except Exception:
             pass
+
     def _load_saved_config(self):
         """Restore last inputs and resolved codes from config.json."""
         saved = self.config_mgr.load()
@@ -504,8 +505,8 @@ class FlightBotGUI(tk.Tk):
         Convert comma-list or City/Country or Country to IATA codes.
         Handle SSL errors gracefully.
         """
-        import urllib.error
         import ssl
+        import urllib.error
 
         toks = [t.strip() for t in txt.split(",") if t.strip()]
         if all(len(t) == 3 and t.isalpha() and t.isupper() for t in toks):
@@ -576,12 +577,23 @@ class FlightBotGUI(tk.Tk):
 
     def _start_monitoring(self):
         """
-        Gather parameters, validate dates, save config, and launch the monitor loop.
+        Gather parameters, validate dates, save config, maybe reset/prune learning
+        state when config changes, and launch the monitor loop.
 
         This version validates the Departure Date and Return Date with clear,
-        user-visible errors instead of letting ValueError bubble up into Tkinter.
-        On validation failure, it restores the UI state and returns immediately.
+        user-visible errors. It also re-syncs 'departure_codes' and
+        'destination_codes' from the current widgets to avoid stale cached values.
         """
+        # --- Re-sync codes from the current UI text so config stays consistent
+        dep_text = self._get_widget_value(self.entries["departure"])
+        dest_text = self._get_widget_value(self.entries["destination"])
+        deps_now = self._parse_codes_from_display(dep_text)
+        dests_now = self._parse_codes_from_display(dest_text)
+        if deps_now:
+            self.resolved_airports["departure"] = deps_now
+        if dests_now:
+            self.resolved_airports["destination"] = dests_now
+
         deps = self.resolved_airports.get("departure", [])
         dests = self.resolved_airports.get("destination", [])
 
@@ -659,7 +671,7 @@ class FlightBotGUI(tk.Tk):
         exclude_raw = self._get_widget_value(self.entries.get("exclude_airlines", ""))
         exclude_list = [s.strip() for s in exclude_raw.split(",") if s.strip()]
 
-        # NEW: forbidden intervals parsing
+        # Forbidden intervals parsing
         forb_raw = self._get_widget_value(self.entries.get("forbidden_intervals", ""))
         try:
             forbidden = self._parse_forbidden_intervals(forb_raw)
@@ -680,11 +692,19 @@ class FlightBotGUI(tk.Tk):
             "window_end": arr_dt if arr_dt else dep_dt,
             "durations": durations,
             "exclude_airlines": exclude_list,
-            # NEW: list of (start_date, end_date) as datetime objects, inclusive
             "forbidden_intervals": forbidden,
         }
 
-        # Save config (store entered strings and resolved codes)
+        # --- IMPORTANT: reset/prune learning state (ts_archive + weights) if pools changed
+        self._maybe_reset_learning(
+            deps=deps,
+            dests=dests,
+            window_start=params["window_start"],
+            window_end=params["window_end"],
+            durations=(list(map(int, durations)) if durations else []),
+        )
+
+        # Save config (store entered strings and the up-to-date resolved codes)
         cfg = {k: self._get_widget_value(w) for k, w in self.entries.items()}
         cfg["departure_codes"] = deps
         cfg["destination_codes"] = dests
@@ -702,12 +722,109 @@ class FlightBotGUI(tk.Tk):
                 )
             ]
 
+        self._stop_event.clear()
+        self.status_label.config(text="Status: starting...")
+        self.progress.start()
+        self.start_button.config(state="disabled")
+        self.cancel_button.config(state="normal")
+
         self._monitor_thread = threading.Thread(
             target=self._monitor_loop,
             args=(deps, dests, pairs, params),
             daemon=True,
         )
         self._monitor_thread.start()
+
+    def _maybe_reset_learning(self, deps: list[str], dests: list[str],
+                              window_start: datetime, window_end: datetime,
+                              durations: list[int]) -> None:
+        """
+        Ensure the learning state (ts_archive.json and weights.json) reflects the *current*
+        config pools. If the departure/destination pools changed since the last run,
+        we HARD-RESET the archive to avoid sampling stale airports. We also prune
+        weights to only include the active pools.
+
+        Additionally, if a date window is provided, we prune any archive entries whose
+        departure date falls outside the window.
+
+        This is intentionally conservative to match the expectation: changing config
+        should reset learned suggestions for old airports.
+        """
+        # Normalize signature (sorted for deterministic comparison)
+        sig = {
+            "deps": sorted(deps),
+            "dests": sorted(dests),
+            # Only the day range matters for pruning; stringify for JSON
+            "window_start": window_start.strftime("%Y-%m-%d") if isinstance(window_start, datetime) else None,
+            "window_end": window_end.strftime("%Y-%m-%d") if isinstance(window_end, datetime) else None,
+        }
+
+        # --- Load archive (if any)
+        arch_path = self._archive_path()
+        if os.path.exists(arch_path):
+            try:
+                with open(arch_path, "r", encoding="utf-8") as fh:
+                    arch = json.load(fh)
+            except Exception:
+                arch = {"gamma": 0.98, "stats": {}}
+        else:
+            arch = {"gamma": 0.98, "stats": {}}
+
+        prev_sig = arch.get("config_sig")
+
+        hard_reset = False
+        # If pools changed (deps or dests), perform a hard reset of TS archive.
+        if not isinstance(prev_sig, dict) or prev_sig.get("deps") != sig["deps"] or prev_sig.get("dests") != sig["dests"]:
+            hard_reset = True
+
+        if hard_reset:
+            arch = {"gamma": arch.get("gamma", 0.98), "stats": {}}
+        else:
+            # Pools are the same; still prune by date window if provided.
+            try:
+                ws = datetime.strptime(sig["window_start"], "%Y-%m-%d") if sig["window_start"] else None
+                we = datetime.strptime(sig["window_end"], "%Y-%m-%d") if sig["window_end"] else None
+            except Exception:
+                ws = we = None
+
+            if arch.get("stats") and (ws and we):
+                new_stats = {}
+                for k, s in arch["stats"].items():
+                    try:
+                        dep_code, dest_code, dd, rd = k.split("|")
+                    except Exception:
+                        continue
+                    # keep only current pools
+                    if dep_code not in deps or dest_code not in dests:
+                        continue
+                    # keep only if departure date within the new window
+                    try:
+                        dd_dt = datetime.strptime(dd, "%Y-%m-%d")
+                    except Exception:
+                        continue
+                    if ws <= dd_dt <= we:
+                        new_stats[k] = s
+                arch["stats"] = new_stats
+
+        # Update stored signature and persist
+        arch["config_sig"] = sig
+        try:
+            tmp = arch_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(arch, fh, indent=2)
+            os.replace(tmp, arch_path)
+        except Exception:
+            pass
+
+        # --- Reset/prune adaptive weights to only active pools (and clear dates bucket)
+        w = self._get_weights()
+        # Keep only active dep/dest keys
+        w["dep_airports"] = {k: float(v) for k, v in w.get("dep_airports", {}).items() if k in deps}
+        w["dest_airports"] = {k: float(v) for k, v in w.get("dest_airports", {}).items() if k in dests}
+        # Dates: wipe and let them rebuild from current window during runtime
+        w["dates"] = {}
+        self._save_weights()
+
 
 
     def _get_global_best_price(self):
@@ -2134,8 +2251,10 @@ class FlightBotGUI(tk.Tk):
         Returns a deduplicated list of tuples (dep, dest, dd, rd).
         """
         import heapq
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
         import numpy as np
-        from datetime import datetime as _dt, timedelta as _td
 
         def _ret_date(dd: str, dur: int) -> str:
             try:
@@ -2271,12 +2390,13 @@ class FlightBotGUI(tk.Tk):
         """
         import json
         import os
+        import tkinter as _tk
         from collections import defaultdict
         from datetime import datetime as _dt
-        import tkinter as _tk
         from tkinter import ttk as _ttk
-        from matplotlib.figure import Figure
+
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.figure import Figure
 
         # Load archive from disk
         arch_path = self._archive_path()
@@ -2710,6 +2830,31 @@ class FlightBotGUI(tk.Tk):
                 dt_a, dt_b = dt_b, dt_a
             out.append((dt_a, dt_b))
         return out
+
+    def _parse_codes_from_display(self, s: str) -> list[str]:
+        """
+        Extract IATA codes from a display string that may contain entries like
+        'CDG - Charles de Gaulle International Airport, ORY - Paris-Orly' or
+        plain comma-separated IATA codes like 'CDG, ORY'.
+
+        Returns:
+            A list of 3-letter uppercase IATA codes found in the string.
+        """
+        s = (s or "").strip()
+        if not s:
+            return []
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        codes: list[str] = []
+        for p in parts:
+            # Case 1: 'ABC - ...'
+            if re.match(r"^[A-Z]{3}\s*-\s*", p):
+                codes.append(p.split("-", 1)[0].strip())
+                continue
+            # Case 2: plain IATA
+            if len(p) == 3 and p.isalpha() and p.isupper():
+                codes.append(p)
+        return codes
+
 
 
 
