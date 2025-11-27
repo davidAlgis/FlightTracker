@@ -846,13 +846,7 @@ class FlightBotGUI(tk.Tk):
     def _monitor_loop(self, deps, dests, pairs, params):
         """
         Continuous monitoring with quiet offline handling.
-
-        Random mode uses Discounted Thompson Sampling + Additive Surrogate to
-        propose candidates in small daily batches. Archive forgets exponentially
-        across days and is retroactively bootstrapped from flight_records.jsonl.
-
-        Now also skips any candidate whose [dep_date, ret_date] overlaps a
-        user-specified forbidden interval.
+        Includes updated logic for Best Price and '10% Close' notifications.
         """
         from datetime import datetime
 
@@ -955,7 +949,9 @@ class FlightBotGUI(tk.Tk):
                         )
                         self._current_bot = bot
 
-                        prev_best = self._get_global_best_price()
+                        # Grab global best BEFORE the new check for comparison
+                        global_prev = self._get_global_best_price()
+                        
                         rec = bot.start()
                         is_offline = bool(getattr(bot, "_offline", False))
                         self._current_bot = None
@@ -978,6 +974,7 @@ class FlightBotGUI(tk.Tk):
                         key = self._archive_key(dep, dest, dd, rd)
 
                         if not rec:
+                            # Penalize no-result
                             gb = self._get_global_best_price()
                             y = (gb * 1.10) if (gb is not None and gb > 0) else 1.0
                             self._archive_add_observation(arch, key, float(y), today_str)
@@ -1001,29 +998,27 @@ class FlightBotGUI(tk.Tk):
                         self._archive_add_observation(arch, key, price, today_str)
                         self._archive_save(arch)
 
-                        global_prev = self._get_global_best_price()
-                        if global_prev is None or price < global_prev:
-                            self.notifier.show_toast(
-                                "New All-Time Low!",
-                                f"{dep}->{dest} on {dd}: EUR {price:.2f}",
-                                duration=10,
-                                threaded=True,
+                        # --- NOTIFICATION LOGIC (Random Mode) ---
+                        if global_prev is None:
+                            # First ever record
+                            self._send_notification(
+                                "FlightBot Started",
+                                f"First result: {dep}->{dest}: {price:.2f} EUR"
+                            )
+                        elif price < global_prev:
+                            # Case 1: New All-Time Low
+                            self._send_notification(
+                                "New All-Time Low! 📉",
+                                f"{dep}->{dest} ({dd}): {price:.2f} EUR (Prev best: {global_prev:.2f})"
+                            )
+                        elif price <= (global_prev * 1.10):
+                            # Case 2: Within 10% of best
+                            self._send_notification(
+                                "Good Deal Alert 🏷️",
+                                f"{dep}->{dest} ({dd}): {price:.2f} EUR (Within 10% of {global_prev:.2f})"
                             )
 
-                        three_days_ago = (
-                            datetime.now() - timedelta(days=3)
-                        ).strftime("%Y-%m-%d-%H")
-                        old_rec = self.record_mgr.load_record(three_days_ago)
-                        if old_rec and price > float(old_rec["price"]) * 1.1:
-                            diff = price - float(old_rec["price"])
-                            pct = diff / float(old_rec["price"]) * 100.0
-                            self.notifier.show_toast(
-                                "Price Jump Alert",
-                                f"{dep}->{dest} jumped EUR {diff:.2f} (+{pct:.0f}%) vs 3 days ago",
-                                duration=10,
-                                threaded=True,
-                            )
-
+                        # Update in-memory bests and UI
                         best_for_pair = self.best_prices.get((dep, dest))
                         if best_for_pair is None or price < best_for_pair:
                             self.best_prices[(dep, dest)] = price
@@ -1032,6 +1027,7 @@ class FlightBotGUI(tk.Tk):
                         self._plot_history()
 
                 else:
+                    # Exhaustive Mode
                     dep_ret_pairs = pairs or []
                     for dep, dest in itertools.product(deps, dests):
                         best_for_pair = None
@@ -1039,7 +1035,6 @@ class FlightBotGUI(tk.Tk):
                             if self._stop_event.is_set():
                                 break
 
-                            # NEW: skip if trip overlaps forbidden intervals
                             if _overlaps_forbidden(dd, rd):
                                 continue
 
@@ -1058,7 +1053,9 @@ class FlightBotGUI(tk.Tk):
                                 excluded_airlines=params.get("exclude_airlines", []),
                             )
                             self._current_bot = bot
-                            prev_best = self._get_global_best_price()
+                            
+                            global_prev = self._get_global_best_price()
+
                             rec = bot.start()
                             is_offline = bool(getattr(bot, "_offline", False))
                             self._current_bot = None
@@ -1097,29 +1094,21 @@ class FlightBotGUI(tk.Tk):
                                 rec.get("arrival_date"),
                             )
 
-                            global_prev = self._get_global_best_price()
-                            if global_prev is None or price < global_prev:
-                                self.notifier.show_toast(
-                                    "New All-Time Low!",
-                                    f"{dep}->{dest} on {dd}: EUR {price:.2f}",
-                                    duration=10,
-                                    threaded=True,
+                            # --- NOTIFICATION LOGIC (Exhaustive Mode) ---
+                            if global_prev is None:
+                                self._send_notification(
+                                    "FlightBot Started",
+                                    f"First result: {dep}->{dest}: {price:.2f} EUR"
                                 )
-
-                            three_days_ago = (
-                                datetime.now() - timedelta(days=3)
-                            ).strftime("%Y-%m-%d-%H")
-                            old_rec = self.record_mgr.load_record(
-                                three_days_ago
-                            )
-                            if old_rec and price > old_rec["price"] * 1.1:
-                                diff = price - old_rec["price"]
-                                pct = diff / old_rec["price"] * 100
-                                self.notifier.show_toast(
-                                    "Price Jump Alert",
-                                    f"{dep}->{dest} jumped EUR {diff:.2f} (+{pct:.0f}%) vs 3 days ago",
-                                    duration=10,
-                                    threaded=True,
+                            elif price < global_prev:
+                                self._send_notification(
+                                    "New All-Time Low! 📉",
+                                    f"{dep}->{dest} ({dd}): {price:.2f} EUR (Prev best: {global_prev:.2f})"
+                                )
+                            elif price <= (global_prev * 1.10):
+                                self._send_notification(
+                                    "Good Deal Alert 🏷️",
+                                    f"{dep}->{dest} ({dd}): {price:.2f} EUR (Within 10% of {global_prev:.2f})"
                                 )
 
                             self._load_historic_best()
@@ -1138,8 +1127,8 @@ class FlightBotGUI(tk.Tk):
 
         self.progress.stop()
         self.status_label.config(text="Status: idle")
-        messagebox.showinfo("FlightBot", "Monitoring loop ended.")
-
+        # Notify on finish if needed, or just log
+        print("Monitoring loop ended.")
     def _filter_airports(self):
         """
         Remove airports whose all pair prices are >=20% above overall best,
@@ -2128,6 +2117,32 @@ class FlightBotGUI(tk.Tk):
                 stats.pop(k, None)
         arch["stats"] = stats
 
+
+    def _send_notification(self, title: str, message: str) -> None:
+        """
+        Robustly send a Windows notification.
+        Handles missing icons and ensures the toaster doesn't crash the thread.
+        """
+        icon_path = self._asset_path("flight_tracker.ico")
+        if not os.path.exists(icon_path):
+            icon_path = None  # Fallback to default python icon if custom not found
+        
+        try:
+            # We create a fresh instance here to ensure thread safety 
+            # and avoid conflicts if previous toasts are still fading.
+            from win10toast import ToastNotifier
+            toaster = ToastNotifier()
+            toaster.show_toast(
+                title,
+                message,
+                icon_path=icon_path,
+                duration=10,
+                threaded=True 
+            )
+        except Exception as e:
+            print(f"Notification failed: {e}")
+
+
     def _archive_add_observation(self, arch: dict, key: str, y: float, today: str) -> None:
         """
         Discounted online update of per-arm statistics.
@@ -2248,12 +2263,12 @@ class FlightBotGUI(tk.Tk):
           - Additive surrogate + beam search to score unseen arms
           - A small random floor to never fully discard options
 
-        Returns a deduplicated list of tuples (dep, dest, dd, rd).
+        IMPORTANT: The Thompson-sampling stage is now *strictly filtered* to the current
+        pools and date window. It will *not* return old dates or airports that are no
+        longer present in the config.
         """
         import heapq
-        from datetime import datetime as _dt
-        from datetime import timedelta as _td
-
+        from datetime import datetime as _dt, timedelta as _td
         import numpy as np
 
         def _ret_date(dd: str, dur: int) -> str:
@@ -2263,82 +2278,117 @@ class FlightBotGUI(tk.Tk):
             except Exception:
                 return dd
 
-        # 1) Thompson on seen arms
-        seen_candidates = []
-        stats = arch.get("stats", {})
+        # Normalize / precompute sets for fast membership checks
+        deps_set = set(deps_pool or [])
+        dests_set = set(dests_pool or [])
+        dates_set = set(dates_pool or [])
+
+        # Map each allowed departure date to the set of allowed return dates, so
+        # sampled archive arms are also constrained by the *current* durations.
+        allowed_rd_by_dd: dict[str, set[str]] = {}
+        if dates_pool and durations:
+            for dd in dates_pool:
+                allowed_rd_by_dd[dd] = { _ret_date(dd, d) for d in set(int(x) for x in durations) }
+
+        # -----------------------------
+        # 1) Thompson on *filtered* arms
+        # -----------------------------
+        seen_candidates: list[tuple[float, tuple[str, str, str, str]]] = []
+        stats = arch.get("stats", {}) or {}
+
         for k, s in stats.items():
             try:
                 dep, dest, dd, rd = k.split("|")
             except Exception:
                 continue
-            mu = float(s.get("mu", 0.0))
-            var = max(1e-6, float(s.get("var", 1.0)))
-            n = max(0.0, float(s.get("n", 0.0)))
-            # Posterior sampling: Normal(mu, var/(n+1)) as a pragmatic choice
-            post_var = var / (n + 1.0)
-            sample = np.random.normal(loc=mu, scale=max(1e-6, np.sqrt(post_var)))
+
+            # Enforce the current pools (airports + departure dates)
+            if deps_set and dep not in deps_set:
+                continue
+            if dests_set and dest not in dests_set:
+                continue
+            if dates_set and dd not in dates_set:
+                continue
+            # Enforce current durations: rd must match one of the allowed returns for dd
+            if dates_set and durations:
+                rds_allowed = allowed_rd_by_dd.get(dd)
+                if rds_allowed is None or rd not in rds_allowed:
+                    continue
+
+            try:
+                mu = float(s.get("mu", 0.0))
+                var = max(1e-6, float(s.get("var", 1.0)))
+                n = max(0.0, float(s.get("n", 0.0)))
+                post_var = var / (n + 1.0)
+                sample = np.random.normal(loc=mu, scale=max(1e-6, np.sqrt(post_var)))
+            except Exception:
+                continue
+
             seen_candidates.append((sample, (dep, dest, dd, rd)))
 
-        seen_candidates.sort(key=lambda t: t[0])  # minimize sample
+        seen_candidates.sort(key=lambda t: t[0])  # lower sampled price is better
         q_seen = int(q * 0.6)
         picked = [cand for _s, cand in seen_candidates[:q_seen]]
 
-        # 2) Additive surrogate for unseen
+        # ---------------------------------------
+        # 2) Additive surrogate for *unseen* arms
+        # ---------------------------------------
         alpha, beta, gamma = self._fit_additive_surrogate(arch)
 
-        # Rank each factor; take top-k for beam
         def _topk(dct: dict, k: int, universe: list[str]) -> list[str]:
+            if not universe:
+                return []
             if not dct:
-                # If no learned scores yet, fall back to uniform beam from pool
                 return universe[: min(k, len(universe))]
             items = [(dct.get(x, 0.0), x) for x in universe]
-            # Lower score is better (we model prices), so sort ascending
-            items.sort(key=lambda t: t[0])
+            items.sort(key=lambda t: t[0])  # lower score (price) is better
             return [x for _score, x in items[: min(k, len(items))]]
 
         top_dep = _topk(alpha, beam_k, deps_pool)
         top_dest = _topk(beta, beam_k, dests_pool)
         top_dates = _topk(gamma, beam_k, dates_pool)
 
-        # Beam search combinations and score with additive surrogate
-        heap = []
+        heap: list[tuple[float, tuple[str, str, str, str]]] = []
         for d in top_dep:
             a_score = alpha.get(d, 0.0)
             for b in top_dest:
                 b_score = beta.get(b, 0.0)
-                # choose a small set of durations for each (d,b)
                 for dd in top_dates:
                     g_score = gamma.get(dd, 0.0)
-                    # choose 2 representative durations: min and median to diversify
+
+                    # choose a small set of durations to diversify
                     if not durations:
                         dur_list = [0]
                     else:
                         durs_sorted = sorted(set(int(x) for x in durations))
                         mid = durs_sorted[len(durs_sorted) // 2]
                         dur_list = [durs_sorted[0], mid] if len(durs_sorted) > 1 else [durs_sorted[0]]
+
                     for dur in dur_list:
                         rd = _ret_date(dd, dur)
                         key = self._archive_key(d, b, dd, rd)
                         if key in stats:
-                            # already in TS set; skip to avoid duplication
+                            # already considered by TS stage; skip duplication
                             continue
                         score = a_score + b_score + g_score
                         heapq.heappush(heap, (score, (d, b, dd, rd)))
 
         q_sur = int(q * 0.3)
-        surrogate_pick = []
+        surrogate_pick: list[tuple[str, str, str, str]] = []
         while heap and len(surrogate_pick) < q_sur:
             _s, cand = heapq.heappop(heap)
             surrogate_pick.append(cand)
 
         picked.extend(surrogate_pick)
 
-        # 3) Random floor
+        # ---------------------------
+        # 3) Random floor (exploration)
+        # ---------------------------
         q_rand = max(1, int(q * random_floor_frac))
         rng = random.Random()
         rand_added = 0
         tries = 0
-        # precompute dates x durations into return dates
+
         dd_all = list(dates_pool)
         while rand_added < q_rand and tries < q_rand * 20:
             tries += 1
@@ -2356,7 +2406,7 @@ class FlightBotGUI(tk.Tk):
 
         # Deduplicate and cap to q
         seen = set()
-        out = []
+        out: list[tuple[str, str, str, str]] = []
         for dep, dest, dd, rd in picked:
             tup = (dep, dest, dd, rd)
             if tup in seen:
