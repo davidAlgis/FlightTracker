@@ -3,11 +3,11 @@
 flight_bot.py
 
 Automated Flight Price Checker using undetected-chromedriver.
-Includes specific fixes for:
-1. Kayak's Cookie Banner (RxNS class)
-2. Google ReCAPTCHA (switching frames to click 'recaptcha-checkbox-border')
+ROBUST MODE: Uses text pattern recognition (Regex) instead of brittle CSS classes
+to find prices and airlines even when Kayak changes their code.
 """
 
+import re
 import threading
 import time
 from typing import Optional
@@ -23,10 +23,6 @@ from win10toast import ToastNotifier
 
 
 class FlightBot:
-    """
-    Scrapes Kayak using undetected-chromedriver.
-    """
-
     def __init__(
         self,
         departure: str,
@@ -87,87 +83,67 @@ class FlightBot:
             return 999.9
 
     def _dismiss_cookies(self):
-        """
-        Click the 'Refuse' button using the user-identified class RxNS.
-        """
         if not self._driver:
             return
         try:
-            xpath_specific = "//button[contains(@class, 'RxNS') and (contains(., 'refuser') or contains(., 'Refuser'))]"
-            btns = self._driver.find_elements(By.XPATH, xpath_specific)
-
-            if not btns:
-                xpath_generic = "//button[contains(., 'Tout refuser') or contains(., 'Refuser')]"
-                btns = self._driver.find_elements(By.XPATH, xpath_generic)
-
-            for btn in btns:
-                if btn.is_displayed():
-                    self._driver.execute_script("arguments[0].click();", btn)
-                    time.sleep(1)
-                    return
+            # Try multiple known cookie button selectors
+            selectors = [
+                "//button[contains(@class, 'RxNS') and contains(., 'refuser')]",  # Common Kayak
+                "//button[contains(., 'Tout refuser')]",
+                "//button[contains(., 'Refuser')]",
+                "//button[contains(., 'Accept all')]",  # Fallback if only accept exists
+            ]
+            for xpath in selectors:
+                btns = self._driver.find_elements(By.XPATH, xpath)
+                for btn in btns:
+                    if btn.is_displayed():
+                        self._driver.execute_script(
+                            "arguments[0].click();", btn
+                        )
+                        time.sleep(0.5)
+                        return
         except Exception:
             pass
 
     def _handle_captcha(self):
-        """
-        Detects and clicks the ReCAPTCHA 'I am not a robot' checkbox.
-        Crucial: Must switch into the iframe to see the checkbox.
-        """
         if not self._driver:
             return
-
         try:
-            # 1. Find all iframes
             iframes = self._driver.find_elements(By.TAG_NAME, "iframe")
             for frame in iframes:
                 try:
-                    # Check if this frame looks like a captcha
                     src = frame.get_attribute("src") or ""
-                    title = frame.get_attribute("title") or ""
-
-                    if "recaptcha" in src or "recaptcha" in title.lower():
-                        # 2. Switch context to the iframe
+                    if "recaptcha" in src:
                         self._driver.switch_to.frame(frame)
-
-                        # 3. Try to find the specific checkbox class
                         try:
                             checkbox = self._driver.find_element(
                                 By.CLASS_NAME, "recaptcha-checkbox-border"
                             )
                             if checkbox.is_displayed():
-                                print(
-                                    "DEBUG: Found ReCAPTCHA checkbox. Clicking..."
-                                )
+                                print("DEBUG: Clicking ReCAPTCHA checkbox...")
                                 checkbox.click()
-                                time.sleep(2)  # Wait for verification
+                                time.sleep(2)
                         except NoSuchElementException:
                             pass
-
-                        # 4. Switch back to main page
                         self._driver.switch_to.default_content()
                 except Exception:
-                    # Reset context if anything goes wrong in this frame
                     self._driver.switch_to.default_content()
         except Exception:
             pass
 
     def _get_current_price(self) -> dict:
-        """
-        Main logic using Undetected Chromedriver.
-        """
         print(
-            f"DEBUG: Starting stealth browser for {self.departure}->{self.destination}..."
+            f"DEBUG: Launching browser for {self.departure}->{self.destination}..."
         )
 
         try:
             options = uc.ChromeOptions()
             options.add_argument("--disable-popup-blocking")
-
-            # Use version 142 to match your installed Chrome
+            # Force version 142 to match your system
             self._driver = uc.Chrome(
                 options=options, use_subprocess=True, version_main=142
             )
-            # Do NOT minimize immediately; let the page load visibly to pass bot checks
+            self._driver.set_window_size(1920, 1080)
         except Exception as e:
             print(f"DEBUG: Failed to start Chrome: {e}")
             self._offline = True
@@ -177,106 +153,144 @@ class FlightBot:
             if self._is_cancelled():
                 return None
 
-            # 2. Navigate
             self._driver.set_page_load_timeout(60)
             try:
                 self._driver.get(self.url)
             except TimeoutException:
                 pass
 
-            # 3. Security & Cookie Loop
-            # We assume challenges might appear. We loop briefly to handle them.
-            max_security_wait = 20
-            for _ in range(max_security_wait):
+            # --- SECURITY LOOP ---
+            for _ in range(25):
                 if self._is_cancelled():
                     return None
 
-                # Check normal title
-                title = self._driver.title.lower()
-                if (
-                    "kayak" in title
-                    and "security" not in title
-                    and "challenge" not in title
-                ):
-                    # If page looks loaded (title is correct), give it one last check for captcha overlays
-                    # sometimes the captcha is an overlay on the main page
+                title = (
+                    self._driver.title.lower() if self._driver.title else ""
+                )
+
+                # Check if we see flight results
+                try:
+                    # Look for ANY text containing price symbols to guess page loaded
+                    body_text = self._driver.find_element(
+                        By.TAG_NAME, "body"
+                    ).text
+                    if "€" in body_text and (
+                        "vol" in title or "flight" in title or "kayak" in title
+                    ):
+                        break
+                except:
+                    pass
+
+                # Handle blocks
+                if not title or "security" in title or "challenge" in title:
                     self._dismiss_cookies()
                     self._handle_captcha()
-                    break
+                else:
+                    self._dismiss_cookies()
+                    time.sleep(1)
 
-                # If blocked or loading, handle interruptions
-                self._dismiss_cookies()
-                self._handle_captcha()
-                time.sleep(1)
-
-            # Minimize only after we think we are past the checks
             try:
                 self._driver.minimize_window()
             except:
                 pass
 
-            # 4. Wait for Results
+            # --- PARSE RESULTS ---
             wait = WebDriverWait(self._driver, 15)
             try:
+                # Wait for the main result list wrapper
                 wait.until(
                     EC.presence_of_element_located(
                         (
                             By.CSS_SELECTOR,
-                            "div[class*='result-item-container']",
+                            "div[class*='result-item-container'], div[class*='list-wrapper']",
                         )
                     )
                 )
             except TimeoutException:
-                print(
-                    "DEBUG: Timeout waiting for results. Possible anti-bot or no flights."
-                )
+                print("DEBUG: Timeout waiting for results.")
                 return None
 
-            if self._is_cancelled():
-                return None
-
-            # 5. Parse Results
             items = self._driver.find_elements(
                 By.CSS_SELECTOR, "div[class*='result-item-container']"
             )
+            print(f"DEBUG: Found {len(items)} flights. Analyzing...")
 
             candidates = []
 
             for i, item in enumerate(items):
                 if self._is_cancelled():
                     return None
-                try:
-                    # -- Airline --
-                    try:
-                        airline_el = item.find_element(
-                            By.CSS_SELECTOR, "div[class*='operator-text']"
-                        )
-                        company = airline_el.text.strip()
-                    except:
-                        company = "Unknown"
 
-                    # -- Exclusions --
+                # Grab all text from the card once to do regex searches (Faster & Robust)
+                card_text = item.text
+                card_text_lower = card_text.lower()
+
+                try:
+                    # 1. ROBUST AIRLINE FINDER
+                    company = "Unknown"
+
+                    # Method A: Look for logo images with Alt text
+                    try:
+                        imgs = item.find_elements(By.CSS_SELECTOR, "img")
+                        for img in imgs:
+                            alt = img.get_attribute("alt")
+                            if (
+                                alt
+                                and len(alt) > 2
+                                and "logo" not in alt.lower()
+                            ):
+                                company = alt
+                                break
+                    except:
+                        pass
+
+                    # Method B: Fallback to text matching common airlines if known
+                    # (Optional refinement could go here)
+
+                    # Method C: Look for specific class if Method A failed
+                    if company == "Unknown":
+                        try:
+                            # Try the operator text class again
+                            op = item.find_element(
+                                By.CSS_SELECTOR, "div[class*='operator-text']"
+                            )
+                            company = op.text.strip()
+                        except:
+                            pass
+
+                    # 2. EXCLUSIONS
                     if self._excluded_airlines:
                         if any(
                             ex in company.lower()
                             for ex in self._excluded_airlines
                         ):
+                            print(
+                                f"  [Flight {i+1}] {company}: REJECTED (Excluded)"
+                            )
                             continue
 
-                    # -- Durations --
-                    txt_lines = item.text.split("\n")
-                    durs = [
-                        t
-                        for t in txt_lines
-                        if "h " in t and ("min" in t or len(t) < 10)
-                    ]
-                    outs = durs[0] if len(durs) > 0 else "0h"
-                    ret = durs[1] if len(durs) > 1 else "0h"
+                    # 3. DURATIONS
+                    # Find all patterns like "12h 30min" or "5h"
+                    # Regex: \d{1,2}h\s*\d{0,2}
+                    dur_matches = re.findall(
+                        r"(\d{1,2})h\s*(\d{0,2})", card_text
+                    )
+
+                    outs = "0h"
+                    ret = "0h"
+
+                    if len(dur_matches) >= 1:
+                        h, m = dur_matches[0]
+                        outs = f"{h}h {m}min"
+                    if len(dur_matches) >= 2:
+                        h, m = dur_matches[1]
+                        ret = f"{h}h {m}min"
 
                     if (
                         self._parse_duration_hours(outs)
                         > self.max_duration_flight
                     ):
+                        # print(f"  [Flight {i+1}] REJECTED (Duration {outs})")
                         continue
                     if (
                         self._parse_duration_hours(ret)
@@ -284,88 +298,108 @@ class FlightBot:
                     ):
                         continue
 
-                    # -- Price Logic --
+                    # 4. ROBUST PRICE FINDER
                     price_eur = None
 
-                    if self.buy_direct:
-                        # "Buy only from company" logic
-                        # 1. Find the main button
-                        btn = item.find_element(
-                            By.CSS_SELECTOR,
-                            "div[role='button'][class*='best'], div[class*='button-wrapper']",
+                    # Regex to find price: Look for number followed by €
+                    # e.g. "1 234 €", "1234 €", "1234€"
+                    # We look for the smallest valid price on the card (often multiple prices shown)
+                    price_matches = re.findall(r"(\d[\d\s]*)\s*€", card_text)
+                    valid_prices = []
+
+                    for p_str in price_matches:
+                        # Clean spaces (1 200 -> 1200)
+                        clean_p = (
+                            p_str.replace(" ", "")
+                            .replace("\u00a0", "")
+                            .replace("\u202f", "")
                         )
+                        if clean_p.isdigit():
+                            val = int(clean_p)
+                            if val > 10:  # Filter out garbage like "0 €"
+                                valid_prices.append(val)
 
-                        # Case A: Main button IS the airline
-                        if company.lower() in btn.text.lower():
-                            raw_p = "".join(filter(str.isdigit, btn.text))
-                            if raw_p:
-                                price_eur = int(raw_p)
+                    if valid_prices:
+                        price_eur = min(
+                            valid_prices
+                        )  # Assume cheapest option on card
 
-                        # Case B: Open dropdown
-                        if not price_eur:
-                            # Scroll & Click
-                            self._driver.execute_script(
-                                "arguments[0].scrollIntoView({block: 'center'});",
-                                btn,
-                            )
-                            time.sleep(0.1)
-                            # Try standard click first
-                            try:
-                                btn.click()
-                            except ElementClickInterceptedException:
-                                self._driver.execute_script(
-                                    "arguments[0].click();", btn
-                                )
+                    if not price_eur:
+                        print(
+                            f"  [Flight {i+1}] {company}: REJECTED (No price found in text)"
+                        )
+                        # print(f"    -> Card text dump: {card_text[:50]}...")
+                        continue
 
-                            time.sleep(1.5)  # Wait for anim
+                    # 5. BUY DIRECT VERIFICATION
+                    if self.buy_direct:
+                        # Strict mode: The Airline Name MUST appear in the "Provider" section
+                        # or be the main button text.
 
-                            # Find the opened bucket
-                            dropdowns = self._driver.find_elements(
-                                By.CSS_SELECTOR,
-                                "div[class*='rates-table-bucket'], div[class*='multibook-dropdown']",
-                            )
+                        # Use a simpler heuristic: look at the bottom line or button text
+                        # "Select" usually implies direct or aggregator.
+                        # "View Deal" usually implies 3rd party.
 
-                            visible_drop = None
-                            for d in dropdowns:
-                                if d.is_displayed():
-                                    visible_drop = d
-                                    break
+                        is_direct = False
 
-                            if visible_drop:
-                                lines = visible_drop.text.split("\n")
-                                for idx, line in enumerate(lines):
-                                    if (
-                                        company.lower() in line.lower()
-                                        or line.lower() in company.lower()
-                                    ):
-                                        # Look nearby for price
-                                        nearby = lines[idx : idx + 3]
-                                        for n in nearby:
-                                            digs = "".join(
-                                                filter(str.isdigit, n)
-                                            )
-                                            if (
-                                                digs
-                                                and len(digs) >= 2
-                                                and ":" not in n
-                                            ):
-                                                price_eur = int(digs)
-                                                break
-                                    if price_eur:
-                                        break
-                    else:
-                        # Standard Cheapest logic
+                        # Check 1: Does the card explicitly say "sold by [Airline]"?
+                        # Kayak text usually: "eDreams", "GoToGate", or "[Airline]" near price.
+
+                        # We scan the text *near* the price we found.
+                        # Since we have the whole card text, we check if Airline Name is present
+                        # AND check if common OTA names are NOT present if we are strict.
+
+                        # Check for common OTAs to reject
+                        otas = [
+                            "edreams",
+                            "gotogate",
+                            "mytrip",
+                            "booking.com",
+                            "kiwi",
+                            "trip.com",
+                            "bravofly",
+                            "lastminute",
+                        ]
+                        found_ota = any(ota in card_text_lower for ota in otas)
+
+                        if (
+                            company.lower() in card_text_lower
+                            and not found_ota
+                        ):
+                            # Likely direct if airline is mentioned and no OTA is mentioned
+                            is_direct = True
+
+                        # Check 2: Specific "Provider" element (if it exists)
                         try:
-                            p_el = item.find_element(
-                                By.CSS_SELECTOR, "div[class*='price-text']"
+                            provs = item.find_elements(
+                                By.CSS_SELECTOR, "div[class*='provider']"
                             )
-                            raw_p = "".join(filter(str.isdigit, p_el.text))
-                            if raw_p:
-                                price_eur = int(raw_p)
+                            for p in provs:
+                                if company.lower() in p.text.lower():
+                                    is_direct = True
                         except:
                             pass
 
-                    if price_eur:
+                        if is_direct:
+                            print(
+                                f"  [Flight {i+1}] {company}: ACCEPTED (Direct) - {price_eur} EUR"
+                            )
+                            candidates.append(
+                                {
+                                    "company": company,
+                                    "price": price_eur,
+                                    "duration_out": outs,
+                                    "duration_return": ret,
+                                }
+                            )
+                        else:
+                            print(
+                                f"  [Flight {i+1}] {company}: REJECTED (3rd party or unverified)"
+                            )
+                    else:
+                        print(
+                            f"  [Flight {i+1}] {company}: ACCEPTED - {price_eur} EUR"
+                        )
                         candidates.append(
                             {
                                 "company": company,
@@ -375,7 +409,8 @@ class FlightBot:
                             }
                         )
 
-                except Exception:
+                except Exception as e:
+                    print(f"  [Flight {i+1}] Error: {e}")
                     continue
 
             if not candidates:
