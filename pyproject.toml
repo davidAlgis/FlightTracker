@@ -21,7 +21,8 @@ dependencies = [
   "win10toast>=0.9",
   "geopy>=2.4.1",
   "pystray>=0.19.5",
-  "matplotlib>=3.7.0"
+  "matplotlib>=3.7.0",
+  "undetected-chromedriver>=3.5.0"
 ]
 
 [project.urls]

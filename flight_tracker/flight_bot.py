@@ -2,35 +2,29 @@
 """
 flight_bot.py
 
-A simple flight-price checker that scrapes Kayak once,
-filters by max one-way/round-trip duration, and returns
-the cheapest available flight under that duration.
-
-Immediate-cancel support:
-- Stores a handle to the live WebDriver.
-- request_cancel() sets the cancel event and quits the driver from another thread.
-- Short timeouts and polling loops avoid long blocking calls.
+Automated Flight Price Checker using undetected-chromedriver.
+Includes specific fixes for:
+1. Kayak's Cookie Banner (RxNS class)
+2. Google ReCAPTCHA (switching frames to click 'recaptcha-checkbox-border')
 """
 
+import threading
 import time
 from typing import Optional
 
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.common.exceptions import TimeoutException, WebDriverException
+import undetected_chromedriver as uc
+from selenium.common.exceptions import (ElementClickInterceptedException,
+                                        NoSuchElementException,
+                                        TimeoutException)
 from selenium.webdriver.common.by import By
-from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 from win10toast import ToastNotifier
 
 
 class FlightBot:
     """
-    Scrapes Kayak for a single round-trip, filters by maximum duration,
-    and identifies the cheapest flight.
-
-    Cancellation:
-    - Provide a threading.Event as cancel_event (or call request_cancel()).
-    - If cancelled, the driver is quit immediately and the run returns None.
+    Scrapes Kayak using undetected-chromedriver.
     """
 
     def __init__(
@@ -43,18 +37,8 @@ class FlightBot:
         driver_path: str = None,
         cancel_event=None,
         excluded_airlines: list[str] | None = None,
+        buy_direct: bool = False,
     ):
-        """
-        :param departure: IATA code of departure airport
-        :param destination: IATA code of destination airport
-        :param dep_date: outbound date (YYYY-MM-DD)
-        :param arrival_date: return date (YYYY-MM-DD)
-        :param max_duration_flight: maximum allowed duration in hours
-        :param driver_path: optional geckodriver path
-        :param cancel_event: optional threading.Event for cooperative cancel
-        :param excluded_airlines: optional list of airline names to exclude
-                                  (case-insensitive substring match, e.g. ["china eastern"])
-        """
         self.departure = departure
         self.destination = destination
         self.dep_date = dep_date
@@ -65,289 +49,370 @@ class FlightBot:
             f"{departure}-{destination}/"
             f"{dep_date}/{arrival_date}?sort=bestflight_a"
         )
-        self.driver_path = driver_path
         self.notifier = ToastNotifier()
         self.cancel_event = cancel_event
-        self._driver: Optional[webdriver.Firefox] = None
-
-        # Excluded airlines normalized to lowercase for substring checks
+        self._driver = None
+        self.buy_direct = buy_direct
         self._excluded_airlines = [
             s.strip().lower()
             for s in (excluded_airlines or [])
             if s and s.strip()
         ]
 
-    # ------------------------------------------------------------------ #
-    # Cancellation helpers
-    # ------------------------------------------------------------------ #
     def _is_cancelled(self) -> bool:
-        """Return True if a cancel_event is present and set."""
         return bool(self.cancel_event and self.cancel_event.is_set())
 
     def request_cancel(self) -> None:
-        """
-        External hard-cancel:
-        - Set cancel flag.
-        - Quit the live WebDriver immediately if present.
-        """
-        try:
-            if self.cancel_event is not None:
-                self.cancel_event.set()
-        except Exception:
-            pass
-        try:
-            if self._driver is not None:
-                self._driver.quit()
-                self._driver = None
-        except Exception:
-            # Ignore driver errors during shutdown
-            self._driver = None
-
-    # ------------------------------------------------------------------ #
-    # Internal utilities
-    # ------------------------------------------------------------------ #
-    def _parse_duration_hours(self, text: str) -> float:
-        """Convert '18h 55min' -> hours as float."""
-        parts = text.split("h")
-        hours = int(parts[0])
-        mins = (
-            int(parts[1].replace("min", "").strip())
-            if "min" in parts[1]
-            else 0
-        )
-        return hours + mins / 60.0
+        if self.cancel_event:
+            self.cancel_event.set()
+        self._quit_driver()
 
     def _quit_driver(self) -> None:
-        """Safely quit and clear the WebDriver if it exists."""
-        drv = self._driver
-        self._driver = None
-        if drv is None:
+        if self._driver:
+            try:
+                self._driver.quit()
+            except Exception:
+                pass
+            self._driver = None
+
+    def _parse_duration_hours(self, text: str) -> float:
+        try:
+            parts = text.lower().split("h")
+            hours = int(parts[0].strip())
+            mins = 0
+            if len(parts) > 1 and "min" in parts[1]:
+                mins = int(parts[1].replace("min", "").strip())
+            return hours + mins / 60.0
+        except:
+            return 999.9
+
+    def _dismiss_cookies(self):
+        """
+        Click the 'Refuse' button using the user-identified class RxNS.
+        """
+        if not self._driver:
             return
         try:
-            drv.quit()
+            xpath_specific = "//button[contains(@class, 'RxNS') and (contains(., 'refuser') or contains(., 'Refuser'))]"
+            btns = self._driver.find_elements(By.XPATH, xpath_specific)
+
+            if not btns:
+                xpath_generic = "//button[contains(., 'Tout refuser') or contains(., 'Refuser')]"
+                btns = self._driver.find_elements(By.XPATH, xpath_generic)
+
+            for btn in btns:
+                if btn.is_displayed():
+                    self._driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(1)
+                    return
         except Exception:
             pass
 
-    def _poll_sleep(self, total_seconds: float, step: float = 0.25) -> bool:
+    def _handle_captcha(self):
         """
-        Sleep up to total_seconds in small steps, returning False early if cancelled.
-        :return: True if full duration elapsed, False if cancelled.
+        Detects and clicks the ReCAPTCHA 'I am not a robot' checkbox.
+        Crucial: Must switch into the iframe to see the checkbox.
         """
-        elapsed = 0.0
-        while elapsed < total_seconds:
-            if self._is_cancelled():
-                return False
-            time.sleep(step)
-            elapsed += step
-        return True
-
-    def _dismiss_cookies_if_present(self) -> None:
-        """
-        Try to click a 'Tout refuser' button if present, without blocking long.
-        Uses short retries so cancellation can interrupt quickly.
-        """
-        if self._driver is None:
+        if not self._driver:
             return
-        xpath = "//button[.//div[text()='Tout refuser']]"
-        for _ in range(20):  # ~5s total at 0.25s per loop
-            if self._is_cancelled() or self._driver is None:
-                return
-            try:
-                btn = self._driver.find_element(By.XPATH, xpath)
-                try:
-                    btn.click()
-                except Exception:
-                    pass
-                return
-            except Exception:
-                time.sleep(0.25)
 
-    # ------------------------------------------------------------------ #
+        try:
+            # 1. Find all iframes
+            iframes = self._driver.find_elements(By.TAG_NAME, "iframe")
+            for frame in iframes:
+                try:
+                    # Check if this frame looks like a captcha
+                    src = frame.get_attribute("src") or ""
+                    title = frame.get_attribute("title") or ""
+
+                    if "recaptcha" in src or "recaptcha" in title.lower():
+                        # 2. Switch context to the iframe
+                        self._driver.switch_to.frame(frame)
+
+                        # 3. Try to find the specific checkbox class
+                        try:
+                            checkbox = self._driver.find_element(
+                                By.CLASS_NAME, "recaptcha-checkbox-border"
+                            )
+                            if checkbox.is_displayed():
+                                print(
+                                    "DEBUG: Found ReCAPTCHA checkbox. Clicking..."
+                                )
+                                checkbox.click()
+                                time.sleep(2)  # Wait for verification
+                        except NoSuchElementException:
+                            pass
+
+                        # 4. Switch back to main page
+                        self._driver.switch_to.default_content()
+                except Exception:
+                    # Reset context if anything goes wrong in this frame
+                    self._driver.switch_to.default_content()
+        except Exception:
+            pass
+
     def _get_current_price(self) -> dict:
         """
-        Scrape each result's price, airline, and durations; return the cheapest dict.
-
-        Offline-safe:
-        - If a network/navigation error occurs, mark the run as offline and return None.
-        - Excludes any airline whose name contains one of the user-provided substrings.
+        Main logic using Undetected Chromedriver.
         """
-        from selenium.common.exceptions import (TimeoutException,
-                                                WebDriverException)
-
-        options = Options()
-        options.add_argument("--headless")
-
-        # Reset offline flag for this call
-        self._offline = False
+        print(
+            f"DEBUG: Starting stealth browser for {self.departure}->{self.destination}..."
+        )
 
         try:
-            self._driver = (
-                webdriver.Firefox(
-                    executable_path=self.driver_path, options=options
-                )
-                if self.driver_path
-                else webdriver.Firefox(options=options)
+            options = uc.ChromeOptions()
+            options.add_argument("--disable-popup-blocking")
+
+            # Use version 142 to match your installed Chrome
+            self._driver = uc.Chrome(
+                options=options, use_subprocess=True, version_main=142
             )
-        except WebDriverException:
-            self._driver = None
+            # Do NOT minimize immediately; let the page load visibly to pass bot checks
+        except Exception as e:
+            print(f"DEBUG: Failed to start Chrome: {e}")
             self._offline = True
-            return None  # type: ignore
+            return None
 
-        html = ""
         try:
             if self._is_cancelled():
-                self._quit_driver()
-                return None  # type: ignore
+                return None
 
+            # 2. Navigate
+            self._driver.set_page_load_timeout(60)
             try:
-                if self._driver is not None:
-                    self._driver.set_page_load_timeout(8)
-                    self._driver.set_script_timeout(8)
-                    self._driver.get(self.url)
+                self._driver.get(self.url)
             except TimeoutException:
-                try:
-                    if self._driver is not None:
-                        self._driver.execute_script("window.stop();")
-                except Exception:
-                    pass
-            except WebDriverException:
-                self._offline = True
-                self._quit_driver()
-                return None  # type: ignore
+                pass
 
-            self._dismiss_cookies_if_present()
-            if self._is_cancelled():
-                self._quit_driver()
-                return None  # type: ignore
-
-            for _ in range(32):
+            # 3. Security & Cookie Loop
+            # We assume challenges might appear. We loop briefly to handle them.
+            max_security_wait = 20
+            for _ in range(max_security_wait):
                 if self._is_cancelled():
-                    self._quit_driver()
-                    return None  # type: ignore
-                try:
-                    if self._driver is not None:
-                        html = self._driver.page_source or ""
-                    if "Fxw9-result-item-container" in html:
-                        break
-                except Exception:
-                    pass
-                time.sleep(0.25)
+                    return None
 
-        finally:
-            self._quit_driver()
+                # Check normal title
+                title = self._driver.title.lower()
+                if (
+                    "kayak" in title
+                    and "security" not in title
+                    and "challenge" not in title
+                ):
+                    # If page looks loaded (title is correct), give it one last check for captcha overlays
+                    # sometimes the captcha is an overlay on the main page
+                    self._dismiss_cookies()
+                    self._handle_captcha()
+                    break
 
-        if self._is_cancelled():
-            return None  # type: ignore
-        if not html:
-            return None  # type: ignore
+                # If blocked or loading, handle interruptions
+                self._dismiss_cookies()
+                self._handle_captcha()
+                time.sleep(1)
 
-        soup = BeautifulSoup(html, "html.parser")
-        results = soup.find_all("div", class_="Fxw9-result-item-container")
-        candidates = []
+            # Minimize only after we think we are past the checks
+            try:
+                self._driver.minimize_window()
+            except:
+                pass
 
-        for result in results:
+            # 4. Wait for Results
+            wait = WebDriverWait(self._driver, 15)
+            try:
+                wait.until(
+                    EC.presence_of_element_located(
+                        (
+                            By.CSS_SELECTOR,
+                            "div[class*='result-item-container']",
+                        )
+                    )
+                )
+            except TimeoutException:
+                print(
+                    "DEBUG: Timeout waiting for results. Possible anti-bot or no flights."
+                )
+                return None
+
             if self._is_cancelled():
-                return None  # type: ignore
+                return None
 
-            comp = result.find("div", class_="J0g6-operator-text")
-            company = comp.get_text(strip=True) if comp else ""
+            # 5. Parse Results
+            items = self._driver.find_elements(
+                By.CSS_SELECTOR, "div[class*='result-item-container']"
+            )
 
-            # Exclusion by case-insensitive substring
-            if self._excluded_airlines:
-                lc = company.lower()
-                if any(excl in lc for excl in self._excluded_airlines):
+            candidates = []
+
+            for i, item in enumerate(items):
+                if self._is_cancelled():
+                    return None
+                try:
+                    # -- Airline --
+                    try:
+                        airline_el = item.find_element(
+                            By.CSS_SELECTOR, "div[class*='operator-text']"
+                        )
+                        company = airline_el.text.strip()
+                    except:
+                        company = "Unknown"
+
+                    # -- Exclusions --
+                    if self._excluded_airlines:
+                        if any(
+                            ex in company.lower()
+                            for ex in self._excluded_airlines
+                        ):
+                            continue
+
+                    # -- Durations --
+                    txt_lines = item.text.split("\n")
+                    durs = [
+                        t
+                        for t in txt_lines
+                        if "h " in t and ("min" in t or len(t) < 10)
+                    ]
+                    outs = durs[0] if len(durs) > 0 else "0h"
+                    ret = durs[1] if len(durs) > 1 else "0h"
+
+                    if (
+                        self._parse_duration_hours(outs)
+                        > self.max_duration_flight
+                    ):
+                        continue
+                    if (
+                        self._parse_duration_hours(ret)
+                        > self.max_duration_flight
+                    ):
+                        continue
+
+                    # -- Price Logic --
+                    price_eur = None
+
+                    if self.buy_direct:
+                        # "Buy only from company" logic
+                        # 1. Find the main button
+                        btn = item.find_element(
+                            By.CSS_SELECTOR,
+                            "div[role='button'][class*='best'], div[class*='button-wrapper']",
+                        )
+
+                        # Case A: Main button IS the airline
+                        if company.lower() in btn.text.lower():
+                            raw_p = "".join(filter(str.isdigit, btn.text))
+                            if raw_p:
+                                price_eur = int(raw_p)
+
+                        # Case B: Open dropdown
+                        if not price_eur:
+                            # Scroll & Click
+                            self._driver.execute_script(
+                                "arguments[0].scrollIntoView({block: 'center'});",
+                                btn,
+                            )
+                            time.sleep(0.1)
+                            # Try standard click first
+                            try:
+                                btn.click()
+                            except ElementClickInterceptedException:
+                                self._driver.execute_script(
+                                    "arguments[0].click();", btn
+                                )
+
+                            time.sleep(1.5)  # Wait for anim
+
+                            # Find the opened bucket
+                            dropdowns = self._driver.find_elements(
+                                By.CSS_SELECTOR,
+                                "div[class*='rates-table-bucket'], div[class*='multibook-dropdown']",
+                            )
+
+                            visible_drop = None
+                            for d in dropdowns:
+                                if d.is_displayed():
+                                    visible_drop = d
+                                    break
+
+                            if visible_drop:
+                                lines = visible_drop.text.split("\n")
+                                for idx, line in enumerate(lines):
+                                    if (
+                                        company.lower() in line.lower()
+                                        or line.lower() in company.lower()
+                                    ):
+                                        # Look nearby for price
+                                        nearby = lines[idx : idx + 3]
+                                        for n in nearby:
+                                            digs = "".join(
+                                                filter(str.isdigit, n)
+                                            )
+                                            if (
+                                                digs
+                                                and len(digs) >= 2
+                                                and ":" not in n
+                                            ):
+                                                price_eur = int(digs)
+                                                break
+                                    if price_eur:
+                                        break
+                    else:
+                        # Standard Cheapest logic
+                        try:
+                            p_el = item.find_element(
+                                By.CSS_SELECTOR, "div[class*='price-text']"
+                            )
+                            raw_p = "".join(filter(str.isdigit, p_el.text))
+                            if raw_p:
+                                price_eur = int(raw_p)
+                        except:
+                            pass
+
+                    if price_eur:
+                        candidates.append(
+                            {
+                                "company": company,
+                                "price": price_eur,
+                                "duration_out": outs,
+                                "duration_return": ret,
+                            }
+                        )
+
+                except Exception:
                     continue
 
-            pdiv = result.find("div", class_="e2GB-price-text")
-            txt = pdiv.get_text().strip() if pdiv else ""
-            digits = "".join(filter(str.isdigit, txt))
-            if not digits:
-                continue
-            price_eur = int(digits)
+            if not candidates:
+                return None
 
-            legs = result.find_all("div", class_="xdW8 xdW8-mod-full-airport")
-            outs = ""
-            ret = ""
-            if legs:
-                dtexts = []
-                for leg in legs:
-                    cell = leg.find(
-                        "div", class_="vmXl vmXl-mod-variant-default"
-                    )
-                    if cell:
-                        dtexts.append(cell.get_text().strip())
-                if dtexts:
-                    outs = dtexts[0]
-                    if len(dtexts) > 1:
-                        ret = dtexts[1]
-
-            if (
-                outs
-                and self._parse_duration_hours(outs) > self.max_duration_flight
-            ):
-                continue
-            if (
-                ret
-                and self._parse_duration_hours(ret) > self.max_duration_flight
-            ):
-                continue
-
-            candidates.append(
+            best = min(candidates, key=lambda x: x["price"])
+            best.update(
                 {
-                    "company": company,
-                    "price": price_eur,
-                    "duration_out": outs,
-                    "duration_return": ret,
+                    "dep_date": self.dep_date,
+                    "arrival_date": self.arrival_date,
+                    "departure_date": self.dep_date,
+                    "return_date": self.arrival_date,
                 }
             )
 
-        if not candidates:
-            return None  # type: ignore
+            print(
+                f"DEBUG: Found best: {best['company']} - {best['price']} EUR"
+            )
+            return best
 
-        best = min(candidates, key=lambda r: r["price"])
-        best.update(
-            {
-                "dep_date": self.dep_date,
-                "arrival_date": self.arrival_date,
-                "departure_date": self.dep_date,
-                "return_date": self.arrival_date,
-            }
-        )
-        return best
+        except Exception as e:
+            print(f"DEBUG: Critical error in scraping: {e}")
+            return None
+        finally:
+            self._quit_driver()
 
     def start(self) -> dict:
-        """
-        Run one check and return the best flight dict.
-
-        Never raises on offline; sets self._offline True and returns None.
-        """
-        # Clear offline flag for this run
         self._offline = False
-
         print(
-            f"Checking best price for {self.departure}->{self.destination} "
-            f"on {self.dep_date}..."
+            f"Checking {self.departure}->{self.destination} on {self.dep_date}..."
         )
-        if self._is_cancelled():
-            return None  # type: ignore
-
-        try:
-            rec = self._get_current_price()
-        except Exception:
-            # Any unexpected scraper error: be conservative and treat as no result
-            self._offline = False
-            return None  # type: ignore
-
+        rec = self._get_current_price()
         if not rec:
-            if getattr(self, "_offline", False):
-                print("  Offline: will retry later.")
-            else:
-                print("  No valid flights under max duration or cancelled.")
-            return None  # type: ignore
-
-        print(f"  Best price: EUR {rec['price']:.2f}")
+            print("  No valid result found.")
+            return None
+        print(f"  Result: {rec['company']} {rec['price']} EUR")
         return rec
 
     def was_offline(self) -> bool:
-        """Return True if the last start() detected a network/offline error."""
-        return bool(getattr(self, "_offline", False))
+        return getattr(self, "_offline", False)
