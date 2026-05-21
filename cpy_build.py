@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Iterable, Tuple
 
 DEFAULT_SRC = Path("./build").resolve()
-DEFAULT_DEST = Path(r"C:\Users\david\AppData\Local\Programs\FlightTracker")
+DEFAULT_DEST = Path(r"C:\Users\David Al\AppData\Local\Programs\FlightTracker")
 
 
 def _validate_paths(src: Path, dest: Path) -> Tuple[bool, str]:

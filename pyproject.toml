@@ -14,14 +14,14 @@ authors = [
 ]
 
 dependencies = [
-  "numpy>=1.21.0",
+  "numpy==1.26.4",
   "selenium>=4.0.0",
   "beautifulsoup4>=4.9.0",
-  "pandas>=1.3.0",
-  "win10toast>=0.9",
+  "pandas==2.2.3",
+  "plyer",
   "geopy>=2.4.1",
   "pystray>=0.19.5",
-  "matplotlib>=3.7.0",
+  "matplotlib>=3.7.0,<3.11.0",
   "undetected-chromedriver>=3.5.0"
 ]
 

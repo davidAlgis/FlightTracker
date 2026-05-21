@@ -32,7 +32,6 @@ from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
                                                NavigationToolbar2Tk)
 from matplotlib.figure import Figure
 from PIL import Image, ImageDraw
-from win10toast import ToastNotifier
 
 from flight_tracker.airport_from_distance import AirportFromDistance
 from flight_tracker.country_to_airport import CountryToAirport
@@ -71,7 +70,6 @@ class FlightBotGUI(tk.Tk):
         self.resolved_airports = {}
         self.config_mgr = ConfigManager()
         self.record_mgr = FlightRecord()
-        self.notifier = ToastNotifier()
         self.best_prices = {}
         self._first_pass = True
         self._stop_event = threading.Event()
@@ -112,13 +110,17 @@ class FlightBotGUI(tk.Tk):
         menubar = tk.Menu(self)
 
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Browse", command=self._browse_executable_location)
+        file_menu.add_command(
+            label="Browse", command=self._browse_executable_location
+        )
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._exit_app)
         menubar.add_cascade(label="File", menu=file_menu)
 
         mon_menu = tk.Menu(menubar, tearoff=0)
-        mon_menu.add_command(label="Reset historic", command=self._reset_historic)
+        mon_menu.add_command(
+            label="Reset historic", command=self._reset_historic
+        )
         menubar.add_cascade(label="Monitoring", menu=mon_menu)
 
         self.config(menu=menubar)
@@ -136,7 +138,9 @@ class FlightBotGUI(tk.Tk):
                 target = os.path.dirname(sys.executable)
             else:
                 # Project root (one level above this file, consistent with _asset_path)
-                target = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                target = os.path.dirname(
+                    os.path.dirname(os.path.abspath(__file__))
+                )
 
             if os.name == "nt":
                 os.startfile(target)  # type: ignore[attr-defined]
@@ -145,7 +149,9 @@ class FlightBotGUI(tk.Tk):
             else:
                 subprocess.Popen(["xdg-open", target])
         except Exception:
-            messagebox.showerror("Browse failed", "Could not open the executable location.")
+            messagebox.showerror(
+                "Browse failed", "Could not open the executable location."
+            )
 
     def _exit_app(self) -> None:
         """
@@ -166,6 +172,7 @@ class FlightBotGUI(tk.Tk):
             # As a last resort, terminate the process to avoid background threads lingering.
             try:
                 import sys
+
                 sys.exit(0)
             except Exception:
                 pass
@@ -178,7 +185,7 @@ class FlightBotGUI(tk.Tk):
         proceed = messagebox.askyesno(
             "Reset historic",
             "This will permanently delete all saved flight search records.\n\n"
-            "Are you sure you want to continue?"
+            "Are you sure you want to continue?",
         )
         if not proceed:
             return
@@ -189,7 +196,9 @@ class FlightBotGUI(tk.Tk):
             if os.path.exists(path):
                 os.remove(path)
         except Exception:
-            messagebox.showerror("Reset failed", "Could not delete the historic records file.")
+            messagebox.showerror(
+                "Reset failed", "Could not delete the historic records file."
+            )
             return
 
         # Clear in-memory bests and refresh panels/plot
@@ -214,10 +223,9 @@ class FlightBotGUI(tk.Tk):
         except Exception:
             pass
 
-        messagebox.showinfo("Reset historic", "All historic search records have been cleared.")
-
-
-
+        messagebox.showinfo(
+            "Reset historic", "All historic search records have been cleared."
+        )
 
     def _configure_grid(self):
         """Configure main window grid for two columns and two rows."""
@@ -247,10 +255,21 @@ class FlightBotGUI(tk.Tk):
             ("Return Date (YYYY-MM-DD)", "arrival_date", False),
             ("Trip Duration (days) (e.g. 7 or 25-35)", "trip_duration", False),
             ("Max Flight Duration (h)", "max_duration_flight", False),
-            ("Notification Threshold (%) (0 = best price only)", "notify_threshold", False),
-            ("Exclude airlines (comma-separated names)", "exclude_airlines", False),
-            ("Forbidden intervals (YYYY-MM-DD-YYYY-MM-DD, comma-separated)",
-             "forbidden_intervals", False),
+            (
+                "Notification Threshold (%) (0 = best price only)",
+                "notify_threshold",
+                False,
+            ),
+            (
+                "Exclude airlines (comma-separated names)",
+                "exclude_airlines",
+                False,
+            ),
+            (
+                "Forbidden intervals (YYYY-MM-DD-YYYY-MM-DD, comma-separated)",
+                "forbidden_intervals",
+                False,
+            ),
         ]
 
         self.entries = {}
@@ -269,18 +288,25 @@ class FlightBotGUI(tk.Tk):
 
         # NEW: "Buy only from company" Checkbox
         chk = tk.Checkbutton(
-            frame, 
-            text="Buy only from company (Official Website)", 
+            frame,
+            text="Buy only from company (Official Website)",
             variable=self.buy_direct_var,
-            command=self._on_fields_changed  # Trigger change detection
+            command=self._on_fields_changed,  # Trigger change detection
         )
-        chk.grid(row=len(fields), column=0, columnspan=2, sticky="w", padx=10, pady=(5,0))
+        chk.grid(
+            row=len(fields),
+            column=0,
+            columnspan=2,
+            sticky="w",
+            padx=10,
+            pady=(5, 0),
+        )
 
         self.start_button = tk.Button(
             frame, text="Start Monitoring", command=self._on_start
         )
         self.start_button.grid(
-            row=len(fields)+1, column=0, columnspan=2, pady=10
+            row=len(fields) + 1, column=0, columnspan=2, pady=10
         )
         self.config_frame = frame
 
@@ -365,6 +391,7 @@ class FlightBotGUI(tk.Tk):
         """
         import ssl
         import urllib.error
+
         retry_ms = 60_000  # 1 minute
 
         # Try to load from URL, with SSL context to handle verification
@@ -378,7 +405,10 @@ class FlightBotGUI(tk.Tk):
                 df = pd.read_csv(local_path)
             else:
                 # Ensure the map exists, even if empty
-                if not hasattr(self, "code_to_name") or self.code_to_name is None:
+                if (
+                    not hasattr(self, "code_to_name")
+                    or self.code_to_name is None
+                ):
                     self.code_to_name = {}
                 # Soft status hint; ignore if status_label not ready yet
                 try:
@@ -387,10 +417,12 @@ class FlightBotGUI(tk.Tk):
                     )
                 except Exception:
                     pass
+
                 # Schedule a single retry if none is pending
                 def _retry():
                     self._airport_retry_id = None
                     self._load_airport_names()
+
                 if (
                     not hasattr(self, "_airport_retry_id")
                     or self._airport_retry_id is None
@@ -471,7 +503,7 @@ class FlightBotGUI(tk.Tk):
         if not trip and not arr:
             return False
         return True
-        
+
     def _on_fields_changed(self):
         """
         Stop monitoring if fields become incomplete.
@@ -553,6 +585,7 @@ class FlightBotGUI(tk.Tk):
             return [c for c, _ in CountryToAirport().get_airports(txt)]
         except (urllib.error.URLError, ssl.SSLCertVerificationError) as e:
             raise ValueError(f"Could not resolve airports: {e}")
+
     def _on_start(self):
         """Start the background monitoring thread if not already running."""
         if not self._fields_complete():
@@ -600,19 +633,21 @@ class FlightBotGUI(tk.Tk):
         Gather parameters, validate dates, save config, maybe reset/prune learning
         state when config changes, and launch the monitor loop.
         """
-        # ... [Same code as before for re-syncing codes and validations] ...
-        # (I will condense the validations for brevity in this answer, ensure you keep them from previous steps)
         dep_text = self._get_widget_value(self.entries["departure"])
         dest_text = self._get_widget_value(self.entries["destination"])
         deps_now = self._parse_codes_from_display(dep_text)
         dests_now = self._parse_codes_from_display(dest_text)
-        if deps_now: self.resolved_airports["departure"] = deps_now
-        if dests_now: self.resolved_airports["destination"] = dests_now
+        if deps_now:
+            self.resolved_airports["departure"] = deps_now
+        if dests_now:
+            self.resolved_airports["destination"] = dests_now
         deps = self.resolved_airports.get("departure", [])
         dests = self.resolved_airports.get("destination", [])
 
         try:
-            dep_dt = self._parse_date_single(self._get_widget_value(self.entries["dep_date"]))
+            dep_dt = self._parse_date_single(
+                self._get_widget_value(self.entries["dep_date"])
+            )
         except ValueError as e:
             messagebox.showerror("Invalid Departure Date", str(e))
             self._reset_ui_on_error()
@@ -639,20 +674,28 @@ class FlightBotGUI(tk.Tk):
                 self._reset_ui_on_error()
                 return
             if arr_dt is None:
-                messagebox.showerror("Invalid input", "Return Date required for Trip Duration.")
+                messagebox.showerror(
+                    "Invalid input", "Return Date required for Trip Duration."
+                )
                 self._reset_ui_on_error()
                 return
             window_days = (arr_dt - dep_dt).days
             max_trip = max(durations)
             if window_days < max_trip:
-                messagebox.showerror("Invalid window", "Date window too short.")
+                messagebox.showerror(
+                    "Invalid window", "Date window too short."
+                )
                 self._reset_ui_on_error()
                 return
 
-        exclude_raw = self._get_widget_value(self.entries.get("exclude_airlines", ""))
+        exclude_raw = self._get_widget_value(
+            self.entries.get("exclude_airlines", "")
+        )
         exclude_list = [s.strip() for s in exclude_raw.split(",") if s.strip()]
 
-        forb_raw = self._get_widget_value(self.entries.get("forbidden_intervals", ""))
+        forb_raw = self._get_widget_value(
+            self.entries.get("forbidden_intervals", "")
+        )
         try:
             forbidden = self._parse_forbidden_intervals(forb_raw)
         except ValueError as e:
@@ -661,15 +704,22 @@ class FlightBotGUI(tk.Tk):
             return
 
         try:
-            notify_threshold = float(self._get_widget_value(self.entries["notify_threshold"]))
-            if notify_threshold < 0: raise ValueError
+            notify_threshold = float(
+                self._get_widget_value(self.entries["notify_threshold"])
+            )
+            if notify_threshold < 0:
+                raise ValueError
         except ValueError:
-            messagebox.showerror("Invalid Input", "Notification Threshold must be >= 0")
+            messagebox.showerror(
+                "Invalid Input", "Notification Threshold must be >= 0"
+            )
             self._reset_ui_on_error()
             return
 
         params = {
-            "max_duration_flight": float(self._get_widget_value(self.entries["max_duration_flight"])),
+            "max_duration_flight": float(
+                self._get_widget_value(self.entries["max_duration_flight"])
+            ),
             "random_mode": random_mode,
             "window_start": dep_dt,
             "window_end": arr_dt if arr_dt else dep_dt,
@@ -677,12 +727,14 @@ class FlightBotGUI(tk.Tk):
             "exclude_airlines": exclude_list,
             "forbidden_intervals": forbidden,
             "notify_threshold": notify_threshold,
-            "buy_direct": self.buy_direct_var.get(), # NEW PARAM
+            "buy_direct": self.buy_direct_var.get(),
         }
 
         self._maybe_reset_learning(
-            deps=deps, dests=dests,
-            window_start=params["window_start"], window_end=params["window_end"],
+            deps=deps,
+            dests=dests,
+            window_start=params["window_start"],
+            window_end=params["window_end"],
             durations=(list(map(int, durations)) if durations else []),
         )
 
@@ -690,13 +742,18 @@ class FlightBotGUI(tk.Tk):
         cfg["departure_codes"] = deps
         cfg["destination_codes"] = dests
         cfg["max_duration_flight"] = params["max_duration_flight"]
-        cfg["buy_direct"] = params["buy_direct"] # NEW SAVE
+        cfg["buy_direct"] = params["buy_direct"]
         self.config_mgr.save(cfg)
 
         if random_mode:
             pairs = None
         else:
-            pairs = [(dep_dt.strftime("%Y-%m-%d"), (arr_dt or dep_dt).strftime("%Y-%m-%d"))]
+            pairs = [
+                (
+                    dep_dt.strftime("%Y-%m-%d"),
+                    (arr_dt or dep_dt).strftime("%Y-%m-%d"),
+                )
+            ]
 
         self._stop_event.clear()
         self.status_label.config(text="Status: starting...")
@@ -718,32 +775,32 @@ class FlightBotGUI(tk.Tk):
         self.start_button.config(state="normal")
         self.cancel_button.config(state="disabled")
 
-
-    def _maybe_reset_learning(self, deps: list[str], dests: list[str],
-                              window_start: datetime, window_end: datetime,
-                              durations: list[int]) -> None:
+    def _maybe_reset_learning(
+        self,
+        deps: list[str],
+        dests: list[str],
+        window_start: datetime,
+        window_end: datetime,
+        durations: list[int],
+    ) -> None:
         """
-        Ensure the learning state (ts_archive.json and weights.json) reflects the *current*
-        config pools. If the departure/destination pools changed since the last run,
-        we HARD-RESET the archive to avoid sampling stale airports. We also prune
-        weights to only include the active pools.
-
-        Additionally, if a date window is provided, we prune any archive entries whose
-        departure date falls outside the window.
-
-        This is intentionally conservative to match the expectation: changing config
-        should reset learned suggestions for old airports.
+        Ensure learning state reflects the current config pools.
         """
-        # Normalize signature (sorted for deterministic comparison)
         sig = {
             "deps": sorted(deps),
             "dests": sorted(dests),
-            # Only the day range matters for pruning; stringify for JSON
-            "window_start": window_start.strftime("%Y-%m-%d") if isinstance(window_start, datetime) else None,
-            "window_end": window_end.strftime("%Y-%m-%d") if isinstance(window_end, datetime) else None,
+            "window_start": (
+                window_start.strftime("%Y-%m-%d")
+                if isinstance(window_start, datetime)
+                else None
+            ),
+            "window_end": (
+                window_end.strftime("%Y-%m-%d")
+                if isinstance(window_end, datetime)
+                else None
+            ),
         }
 
-        # --- Load archive (if any)
         arch_path = self._archive_path()
         if os.path.exists(arch_path):
             try:
@@ -757,17 +814,27 @@ class FlightBotGUI(tk.Tk):
         prev_sig = arch.get("config_sig")
 
         hard_reset = False
-        # If pools changed (deps or dests), perform a hard reset of TS archive.
-        if not isinstance(prev_sig, dict) or prev_sig.get("deps") != sig["deps"] or prev_sig.get("dests") != sig["dests"]:
+        if (
+            not isinstance(prev_sig, dict)
+            or prev_sig.get("deps") != sig["deps"]
+            or prev_sig.get("dests") != sig["dests"]
+        ):
             hard_reset = True
 
         if hard_reset:
             arch = {"gamma": arch.get("gamma", 0.98), "stats": {}}
         else:
-            # Pools are the same; still prune by date window if provided.
             try:
-                ws = datetime.strptime(sig["window_start"], "%Y-%m-%d") if sig["window_start"] else None
-                we = datetime.strptime(sig["window_end"], "%Y-%m-%d") if sig["window_end"] else None
+                ws = (
+                    datetime.strptime(sig["window_start"], "%Y-%m-%d")
+                    if sig["window_start"]
+                    else None
+                )
+                we = (
+                    datetime.strptime(sig["window_end"], "%Y-%m-%d")
+                    if sig["window_end"]
+                    else None
+                )
             except Exception:
                 ws = we = None
 
@@ -778,10 +845,8 @@ class FlightBotGUI(tk.Tk):
                         dep_code, dest_code, dd, rd = k.split("|")
                     except Exception:
                         continue
-                    # keep only current pools
                     if dep_code not in deps or dest_code not in dests:
                         continue
-                    # keep only if departure date within the new window
                     try:
                         dd_dt = datetime.strptime(dd, "%Y-%m-%d")
                     except Exception:
@@ -790,7 +855,6 @@ class FlightBotGUI(tk.Tk):
                         new_stats[k] = s
                 arch["stats"] = new_stats
 
-        # Update stored signature and persist
         arch["config_sig"] = sig
         try:
             tmp = arch_path + ".tmp"
@@ -800,16 +864,19 @@ class FlightBotGUI(tk.Tk):
         except Exception:
             pass
 
-        # --- Reset/prune adaptive weights to only active pools (and clear dates bucket)
         w = self._get_weights()
-        # Keep only active dep/dest keys
-        w["dep_airports"] = {k: float(v) for k, v in w.get("dep_airports", {}).items() if k in deps}
-        w["dest_airports"] = {k: float(v) for k, v in w.get("dest_airports", {}).items() if k in dests}
-        # Dates: wipe and let them rebuild from current window during runtime
+        w["dep_airports"] = {
+            k: float(v)
+            for k, v in w.get("dep_airports", {}).items()
+            if k in deps
+        }
+        w["dest_airports"] = {
+            k: float(v)
+            for k, v in w.get("dest_airports", {}).items()
+            if k in dests
+        }
         w["dates"] = {}
         self._save_weights()
-
-
 
     def _get_global_best_price(self):
         """Return the best price ever recorded, or None if no records."""
@@ -830,39 +897,32 @@ class FlightBotGUI(tk.Tk):
     def _monitor_loop(self, deps, dests, pairs, params):
         """
         Continuous monitoring with quiet offline handling.
-        Includes updated logic for Best Price and Configurable notifications.
         """
         from datetime import datetime
 
-        _ = self._get_weights()  # keep existing lazy-load (no-op)
+        _ = self._get_weights()
 
         random_mode = bool(params.get("random_mode"))
         window_start = params.get("window_start")
         window_end = params.get("window_end")
         durations = params.get("durations") or []
         samples_per_sweep = 10 if random_mode else 0
-        
-        # Get notification percentage (default to 10 if missing)
+
         notify_percent = params.get("notify_threshold", 10.0)
         notify_multiplier = 1.0 + (notify_percent / 100.0)
 
         OFFLINE_WAIT_SEC = 60
 
-        # TS/surrogate archive (persistent)
         arch = self._archive_load()
-
-        # Retroactive, incremental bootstrap from existing JSONL
         self._archive_bootstrap_from_records(arch)
 
         today_str = datetime.now().strftime("%Y-%m-%d")
         self._archive_decay(arch, today_str)
         self._archive_save(arch)
 
-        # NEW: forbidden intervals list of tuples (dt_start, dt_end), inclusive
         forbidden = params.get("forbidden_intervals", [])
 
         def _overlaps_forbidden(dd_str: str, rd_str: str) -> bool:
-            """Return True if the inclusive trip range overlaps any forbidden interval."""
             try:
                 dd = datetime.strptime(dd_str, "%Y-%m-%d")
                 rd = datetime.strptime(rd_str, "%Y-%m-%d")
@@ -871,7 +931,6 @@ class FlightBotGUI(tk.Tk):
             if rd < dd:
                 dd, rd = rd, dd
             for f0, f1 in forbidden:
-                # Inclusive overlap: not (trip before interval or after interval)
                 if not (rd < f0 or dd > f1):
                     return True
             return False
@@ -885,20 +944,25 @@ class FlightBotGUI(tk.Tk):
                     deps_pool = list(deps)
                     dests_pool = list(dests)
 
-                    # Build date pool in the current window based on durations
                     dates_pool = []
                     if window_start and window_end and durations:
                         latest_dep_all = [
                             (window_end - timedelta(days=int(d))).date()
                             for d in durations
                         ]
-                        latest_dep = min(latest_dep_all) if latest_dep_all else window_end.date()
+                        latest_dep = (
+                            min(latest_dep_all)
+                            if latest_dep_all
+                            else window_end.date()
+                        )
                         num_days = max(
                             0, (latest_dep - window_start.date()).days + 1
                         )
                         for i in range(num_days):
                             dates_pool.append(
-                                (window_start + timedelta(days=i)).strftime("%Y-%m-%d")
+                                (window_start + timedelta(days=i)).strftime(
+                                    "%Y-%m-%d"
+                                )
                             )
 
                     proposals = self._propose_batch_ts_additive(
@@ -906,13 +970,14 @@ class FlightBotGUI(tk.Tk):
                         deps_pool=deps_pool,
                         dests_pool=dests_pool,
                         dates_pool=dates_pool,
-                        durations=list(map(int, durations)) if durations else [],
+                        durations=(
+                            list(map(int, durations)) if durations else []
+                        ),
                         q=max(1, samples_per_sweep),
                         random_floor_frac=0.10,
                         beam_k=20,
                     )
 
-                    # NEW: filter out proposals overlapping forbidden intervals
                     proposals = [
                         (dep, dest, dd, rd)
                         for (dep, dest, dd, rd) in proposals
@@ -933,14 +998,15 @@ class FlightBotGUI(tk.Tk):
                             arrival_date=rd,
                             max_duration_flight=params["max_duration_flight"],
                             cancel_event=self._stop_event,
-                            excluded_airlines=params.get("exclude_airlines", []),
+                            excluded_airlines=params.get(
+                                "exclude_airlines", []
+                            ),
                             buy_direct=params.get("buy_direct", False),
                         )
                         self._current_bot = bot
 
-                        # Grab global best BEFORE the new check for comparison
                         global_prev = self._get_global_best_price()
-                        
+
                         rec = bot.start()
                         is_offline = bool(getattr(bot, "_offline", False))
                         self._current_bot = None
@@ -963,10 +1029,15 @@ class FlightBotGUI(tk.Tk):
                         key = self._archive_key(dep, dest, dd, rd)
 
                         if not rec:
-                            # Penalize no-result
                             gb = self._get_global_best_price()
-                            y = (gb * 1.10) if (gb is not None and gb > 0) else 1.0
-                            self._archive_add_observation(arch, key, float(y), today_str)
+                            y = (
+                                (gb * 1.10)
+                                if (gb is not None and gb > 0)
+                                else 1.0
+                            )
+                            self._archive_add_observation(
+                                arch, key, float(y), today_str
+                            )
                             self._archive_save(arch)
                             continue
 
@@ -984,30 +1055,29 @@ class FlightBotGUI(tk.Tk):
                             rec.get("arrival_date"),
                         )
 
-                        self._archive_add_observation(arch, key, price, today_str)
+                        self._archive_add_observation(
+                            arch, key, price, today_str
+                        )
                         self._archive_save(arch)
 
-                        # --- NOTIFICATION LOGIC (Random Mode) ---
                         if global_prev is None:
-                            # First ever record
                             self._send_notification(
                                 "FlightBot Started",
-                                f"First result: {dep}->{dest}: {price:.2f} EUR"
+                                f"First result: {dep}->{dest}: {price:.2f} EUR",
                             )
                         elif price < global_prev:
-                            # Case 1: New All-Time Low (Strictly better)
                             self._send_notification(
                                 "New All-Time Low! 📉",
-                                f"{dep}->{dest} ({dd}): {price:.2f} EUR (Prev best: {global_prev:.2f})"
+                                f"{dep}->{dest} ({dd}): {price:.2f} EUR (Prev best: {global_prev:.2f})",
                             )
-                        elif notify_percent > 0 and price <= (global_prev * notify_multiplier):
-                            # Case 2: Good Deal (Only if percentage > 0)
+                        elif notify_percent > 0 and price <= (
+                            global_prev * notify_multiplier
+                        ):
                             self._send_notification(
                                 "Good Deal Alert 🏷️",
-                                f"{dep}->{dest} ({dd}): {price:.2f} EUR (Within {notify_percent}% of {global_prev:.2f})"
+                                f"{dep}->{dest} ({dd}): {price:.2f} EUR (Within {notify_percent}% of {global_prev:.2f})",
                             )
 
-                        # Update in-memory bests and UI
                         best_for_pair = self.best_prices.get((dep, dest))
                         if best_for_pair is None or price < best_for_pair:
                             self.best_prices[(dep, dest)] = price
@@ -1016,7 +1086,6 @@ class FlightBotGUI(tk.Tk):
                         self._plot_history()
 
                 else:
-                    # Exhaustive Mode
                     dep_ret_pairs = pairs or []
                     for dep, dest in itertools.product(deps, dests):
                         best_for_pair = None
@@ -1039,11 +1108,13 @@ class FlightBotGUI(tk.Tk):
                                     "max_duration_flight"
                                 ],
                                 cancel_event=self._stop_event,
-                                excluded_airlines=params.get("exclude_airlines", []),
-                                buy_direct=params.get("buy_direct", False)
+                                excluded_airlines=params.get(
+                                    "exclude_airlines", []
+                                ),
+                                buy_direct=params.get("buy_direct", False),
                             )
                             self._current_bot = bot
-                            
+
                             global_prev = self._get_global_best_price()
 
                             rec = bot.start()
@@ -1084,21 +1155,22 @@ class FlightBotGUI(tk.Tk):
                                 rec.get("arrival_date"),
                             )
 
-                            # --- NOTIFICATION LOGIC (Exhaustive Mode) ---
                             if global_prev is None:
                                 self._send_notification(
                                     "FlightBot Started",
-                                    f"First result: {dep}->{dest}: {price:.2f} EUR"
+                                    f"First result: {dep}->{dest}: {price:.2f} EUR",
                                 )
                             elif price < global_prev:
                                 self._send_notification(
                                     "New All-Time Low! 📉",
-                                    f"{dep}->{dest} ({dd}): {price:.2f} EUR (Prev best: {global_prev:.2f})"
+                                    f"{dep}->{dest} ({dd}): {price:.2f} EUR (Prev best: {global_prev:.2f})",
                                 )
-                            elif notify_percent > 0 and price <= (global_prev * notify_multiplier):
+                            elif notify_percent > 0 and price <= (
+                                global_prev * notify_multiplier
+                            ):
                                 self._send_notification(
                                     "Good Deal Alert 🏷️",
-                                    f"{dep}->{dest} ({dd}): {price:.2f} EUR (Within {notify_percent}% of {global_prev:.2f})"
+                                    f"{dep}->{dest} ({dd}): {price:.2f} EUR (Within {notify_percent}% of {global_prev:.2f})",
                                 )
 
                             self._load_historic_best()
@@ -1117,15 +1189,11 @@ class FlightBotGUI(tk.Tk):
 
         self.progress.stop()
         self.status_label.config(text="Status: idle")
-        # Notify on finish if needed, or just log
-        print("Monitoring loop ended.")    
-
+        print("Monitoring loop ended.")
 
     def _filter_airports(self):
         """
-        Remove airports whose all pair prices are >=20% above overall best,
-        except those that ever appeared in a daily-best record.
-        Save updated codes and display text back to config.
+        Remove airports whose all pair prices are >=20% above overall best.
         """
         if not self.best_prices:
             return
@@ -1194,13 +1262,9 @@ class FlightBotGUI(tk.Tk):
         cfg["destination"] = display["destination"]
         self.config_mgr.save(cfg)
 
-    # Historic-best panel & history graph
     def _load_historic_best(self) -> None:
         """
         Read flight_records.jsonl and show the single cheapest record ever found.
-        Works with both legacy daily records (key date) and the new hourly records
-        (key datetime). Stores a click-through link when dates are available.
-        Now also displays the trip dates (dep_date -> arrival_date) when present.
         """
         if not os.path.exists(self.record_mgr.path):
             return
@@ -1257,7 +1321,6 @@ class FlightBotGUI(tk.Tk):
         self.historic_text.insert(END, text)
         self.historic_text.configure(state="disabled")
 
-        # Store link payload and bind click
         if best.get("departure") and best.get("destination") and dd and rd:
             self._historic_best_link = (
                 best["departure"],
@@ -1275,9 +1338,6 @@ class FlightBotGUI(tk.Tk):
     def _open_kayak_search(
         self, dep: str, dest: str, dep_date: str, arrival_date: str
     ) -> None:
-        """
-        Open the Kayak search URL for the given parameters in the default browser.
-        """
         import webbrowser
 
         url = (
@@ -1293,10 +1353,6 @@ class FlightBotGUI(tk.Tk):
             )
 
     def _on_historic_click(self, event) -> None:
-        """
-        Click handler for the Historic Best Flight text panel.
-        Opens the stored Kayak URL when date info is available.
-        """
         link = getattr(self, "_historic_best_link", None)
         if not link:
             messagebox.showinfo(
@@ -1308,21 +1364,13 @@ class FlightBotGUI(tk.Tk):
         self._open_kayak_search(dep, dest, dd, rd)
 
     def _plot_history(self) -> None:
-        """
-        Plot ONE dot per calendar day: the best (lowest) price recorded that day.
-
-        We first aggregate all hourly records into a daily_best map, then plot the
-        per-day minima only. Hover/click still show the full details of that day's
-        best record, including dep/arr dates when available.
-        """
-        import matplotlib.dates as mdates  # local import
+        import matplotlib.dates as mdates
 
         if not os.path.exists(self.record_mgr.path):
             return
 
         from datetime import datetime as _dt
 
-        # 1) Aggregate: keep only the best (lowest) price per day, with details.
         daily_best: dict[str, dict] = {}
         with open(self.record_mgr.path, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -1364,17 +1412,14 @@ class FlightBotGUI(tk.Tk):
         if not daily_best:
             return
 
-        # 2) Build per-day series (sorted by date) → one point per day.
         days_sorted = sorted(daily_best.keys())
         times = [_dt.strptime(d, "%Y-%m-%d") for d in days_sorted]
         prices = [daily_best[d]["price"] for d in days_sorted]
 
-        # 3) Plot.
         self.ax.clear()
         line_list = self.ax.plot_date(times, prices, "-o", picker=5)
         self._line = line_list[0]
 
-        # Recreate the annotation on the fresh axes so it can be shown and picked
         if hasattr(self, "_point_annotation"):
             try:
                 self._point_annotation.remove()
@@ -1396,18 +1441,16 @@ class FlightBotGUI(tk.Tk):
         except Exception:
             pass
 
-        # 4) Save data for hover/click handlers.
         self._plot_times = times
         self._plot_prices = prices
-        self._plot_days = days_sorted  # <— one entry per plotted point
-        self._daily_best = daily_best  # details keyed by YYYY-MM-DD
-        self._annotation_link = None  # (dep, dest, dep_date, arrival_date)
+        self._plot_days = days_sorted
+        self._daily_best = daily_best
+        self._annotation_link = None
 
         self.ax.set_xlabel("Monitoring date")
         self.ax.set_ylabel("Price (EUR)")
         self.figure.autofmt_xdate()
 
-        # Ensure handlers are connected once
         if not hasattr(self, "_hover_cid"):
             self._hover_cid = self.canvas.mpl_connect(
                 "motion_notify_event", self._on_motion
@@ -1417,30 +1460,21 @@ class FlightBotGUI(tk.Tk):
                 "pick_event", self._on_pick
             )
 
-        # NEW: bind F12 once to open the TS archive popup
-        if not hasattr(self, "_ts_debug_bound") or not getattr(self, "_ts_debug_bound", False):
+        if not hasattr(self, "_ts_debug_bound") or not getattr(
+            self, "_ts_debug_bound", False
+        ):
             try:
                 self.bind("<F12>", self._show_ts_archive_popup)
                 self._ts_debug_bound = True
             except Exception:
-                # If binding fails for any reason, do not crash the UI.
                 self._ts_debug_bound = False
 
         self.canvas.draw_idle()
 
     def _on_motion(self, event) -> None:
-        """
-        Hover handler: when the mouse is near a plotted point, show an annotation
-        bubble with the BEST flight of that calendar day (min price) and details.
-        Now also displays the trip dates (dep_date -> arrival_date) when available.
-
-        Improved: the tooltip bubble automatically chooses an offset and alignment
-        so it is less likely to be cropped by the window edges.
-        """
         import matplotlib.dates as mdates
         import numpy as np
 
-        # If the mouse is not over our axes or we have no plotted line yet, hide.
         if not hasattr(self, "_line") or event.inaxes is not self.ax:
             if self._point_annotation.get_visible():
                 self._point_annotation.set_visible(False)
@@ -1462,12 +1496,13 @@ class FlightBotGUI(tk.Tk):
                 except Exception:
                     try:
                         return mdates.date2num(
-                            np.datetime64(x).astype("datetime64[ns]").astype(object)
+                            np.datetime64(x)
+                            .astype("datetime64[ns]")
+                            .astype(object)
                         )
                     except Exception:
                         return None
 
-        # Find nearest plotted point in pixel distance
         threshold_px = 8
         min_dist2 = (threshold_px + 1) ** 2
         nearest_idx = None
@@ -1480,8 +1515,9 @@ class FlightBotGUI(tk.Tk):
                 yn = float(ydata[i])
             except Exception:
                 continue
-            # Data -> display pixels
-            px_py = self.ax.transData.transform(np.array([xn, yn], dtype=float))
+            px_py = self.ax.transData.transform(
+                np.array([xn, yn], dtype=float)
+            )
             if px_py.ndim == 1:
                 px, py = float(px_py[0]), float(px_py[1])
             else:
@@ -1493,9 +1529,8 @@ class FlightBotGUI(tk.Tk):
             if d2 < min_dist2:
                 min_dist2 = d2
                 nearest_idx = i
-                nearest_px, nearest_py = px, py  # keep display coords
+                nearest_px, nearest_py = px, py
 
-        # If no nearby point, hide the tooltip
         if nearest_idx is None:
             if self._point_annotation.get_visible():
                 self._point_annotation.set_visible(False)
@@ -1503,9 +1538,16 @@ class FlightBotGUI(tk.Tk):
                 self.canvas.draw_idle()
             return
 
-        # Build the info text, using your existing daily-best mapping
-        day_key = self._plot_days[nearest_idx] if hasattr(self, "_plot_days") else None
-        best = self._daily_best.get(day_key, {}) if hasattr(self, "_daily_best") else {}
+        day_key = (
+            self._plot_days[nearest_idx]
+            if hasattr(self, "_plot_days")
+            else None
+        )
+        best = (
+            self._daily_best.get(day_key, {})
+            if hasattr(self, "_daily_best")
+            else {}
+        )
 
         if best:
             dd = best.get("dep_date")
@@ -1538,37 +1580,26 @@ class FlightBotGUI(tk.Tk):
             text = f"{ts_str}\nEUR {y_val:.2f}"
             self._annotation_link = None
 
-        # Data coordinates of the point to annotate
         x_pt = xdata[nearest_idx]
         y_pt = ydata[nearest_idx]
 
-        # Choose a safe offset and alignment based on pixel position inside the axes
         xytext, ha, va = self._choose_annotation_offset(nearest_px, nearest_py)
 
-        # Apply annotation properties and show it
         self._point_annotation.xy = (x_pt, y_pt)
         self._point_annotation.set_text(text)
         self._point_annotation.set_visible(True)
         self._point_annotation.set_ha(ha)
         self._point_annotation.set_va(va)
-        self._point_annotation.set_position(xytext)  # same as set_xytext
-        # Keep an arrow; properties already set when created
+        self._point_annotation.set_position(xytext)
 
         self.canvas.draw_idle()
 
     def _on_pick(self, event) -> None:
-        """
-        Pick handler.
-        - Clicking on a data point shows the tooltip (existing behavior).
-        - Clicking on the visible annotation bubble opens the Kayak URL for that day
-          when we have dep/arr dates stored.
-        """
         from datetime import datetime as _dt
 
         import matplotlib.dates as mdates
         import numpy as np
 
-        # Click on annotation bubble or its bbox -> open Kayak if we have a link
         if getattr(event, "artist", None) is not None:
             if event.artist is self._point_annotation or (
                 hasattr(self._point_annotation, "get_bbox_patch")
@@ -1580,7 +1611,6 @@ class FlightBotGUI(tk.Tk):
                     self._open_kayak_search(dep, dest, dd, rd)
                 return
 
-        # Otherwise, treat as clicking on a plotted point (line pick)
         if hasattr(event, "artist") and event.ind:
             ind = event.ind[0]
             xdata, ydata = event.artist.get_data()
@@ -1620,28 +1650,15 @@ class FlightBotGUI(tk.Tk):
             self.canvas.draw_idle()
 
     def _parse_date_single(self, s: str) -> datetime:
-        """
-        Parse a single date in 'YYYY-MM-DD' format into a datetime.
-
-        Raises:
-            ValueError: with a precise message if the string does not match the
-            expected format or if it is not a real calendar date (e.g., day out
-            of range for the given month).
-        """
         s = s.strip()
-
-        # First validate the format explicitly.
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
             raise ValueError(f"'{s}' does not match YYYY-MM-DD.")
-
         try:
             return datetime.strptime(s, "%Y-%m-%d")
         except ValueError as e:
-            # Preserve the underlying reason (e.g., "day is out of range for month").
             raise ValueError(f"'{s}' is not a valid calendar date: {e}") from e
 
     def _parse_durations(self, s):
-        """Parse 'N' or 'N-M' into a list of integer durations."""
         parts = s.strip().split("-")
         if len(parts) == 1:
             return [int(parts[0])]
@@ -1653,22 +1670,18 @@ class FlightBotGUI(tk.Tk):
         raise ValueError("Invalid duration format")
 
     def _on_close(self):
-        """Hide the window and show the tray icon instead of exiting."""
         self.withdraw()
         self.tray_icon.visible = True
 
     def _restore(self, icon, item):
-        """Restore the window from the system tray."""
         self.deiconify()
         self.tray_icon.visible = False
 
     def _quit_app(self, icon, item):
-        """Stop the tray icon and exit the application."""
         icon.stop()
         self.destroy()
 
     def _create_tray_icon(self):
-        """Create a tray icon using the project assets or a fallback."""
         icon_path = self._asset_path("flight_tracker.ico")
         if os.path.exists(icon_path):
             img = Image.open(icon_path)
@@ -1686,7 +1699,6 @@ class FlightBotGUI(tk.Tk):
         self.tray_icon = icon
 
     def _asset_path(self, *parts: str) -> str:
-        """Return an absolute path inside the assets/ folder for dev and frozen apps."""
         import sys
 
         if getattr(sys, "frozen", False):
@@ -1696,32 +1708,16 @@ class FlightBotGUI(tk.Tk):
         return os.path.join(root, "assets", *parts)
 
     def _weights_path(self) -> str:
-        """
-        Return the path where adaptive sampling weights are stored.
-        Lives next to config.json by default as weights.json.
-        """
         cfg_path = getattr(self.config_mgr, "path", "config.json")
         root = os.path.dirname(os.path.abspath(cfg_path))
         return os.path.join(root, "weights.json")
 
     def _load_weights(self) -> dict:
-        """
-        Load weights from disk. Structure:
-        {
-            "dep_airports": { "CDG": 0.5, "ORY": 0.5, ... },
-            "dest_airports": { "JFK": 0.33, "EWR": 0.33, "LGA": 0.34, ... },
-            "dates": { "2026-02-01": 0.01, ... }
-        }
-
-        Stored values are non-negative "raw" weights. When sampling over a pool,
-        we normalize to probabilities. Unseen keys default to 1.0.
-        """
         path = self._weights_path()
         try:
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
-                    # Basic shape guard
                     if not isinstance(data, dict):
                         raise ValueError
                     for k in ("dep_airports", "dest_airports", "dates"):
@@ -1733,19 +1729,14 @@ class FlightBotGUI(tk.Tk):
         return {"dep_airports": {}, "dest_airports": {}, "dates": {}}
 
     def _save_weights(self) -> None:
-        """Persist current weights to disk."""
         try:
             path = self._weights_path()
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(self._weights, fh, indent=2)
         except Exception:
-            # Silent failure is acceptable; this is a heuristic aid.
             pass
 
     def _get_weights(self) -> dict:
-        """
-        Lazy-init accessor so we do not need to modify __init__.
-        """
         if not hasattr(self, "_weights") or self._weights is None:
             self._weights = self._load_weights()
         return self._weights
@@ -1753,20 +1744,12 @@ class FlightBotGUI(tk.Tk):
     def _init_weights_for_category(
         self, cat: str, candidates: list[str]
     ) -> None:
-        """
-        Ensure raw weights exist for all 'candidates' in category 'cat'.
-        Unseen keys start at 1.0 so that a fresh pool is uniform when normalized.
-        """
         w = self._get_weights()[cat]
         for key in candidates:
             if key not in w:
                 w[key] = 1.0
 
     def _normalize_probs(self, cat: str, pool: list[str]) -> list[float]:
-        """
-        Build a probability vector over 'pool' from raw weights in category 'cat'.
-        If every weight is zero or missing, fallback to uniform.
-        """
         w = self._get_weights()[cat]
         vals = [float(w.get(k, 1.0)) for k in pool]
         s = sum(vals)
@@ -1776,9 +1759,6 @@ class FlightBotGUI(tk.Tk):
         return [v / s for v in vals]
 
     def _choose_weighted(self, cat: str, pool: list[str]) -> str:
-        """
-        Draw one key from 'pool' according to normalized weights in category 'cat'.
-        """
         import random as _rnd
 
         self._init_weights_for_category(cat, pool)
@@ -1789,45 +1769,24 @@ class FlightBotGUI(tk.Tk):
             acc += p
             if r <= acc:
                 return key
-        return pool[-1]  # numerical fallback
+        return pool[-1]
 
     def _adjust_weight(
         self, cat: str, selected: str, delta: float, pool: list[str]
     ) -> None:
-        """
-        Gently adjust probabilities for one category within 'pool', then renormalize.
-
-        Strategy (slow + stable):
-          - Work on positive raw weights and update the *selected* item
-            multiplicatively, others unchanged (the renormalization naturally
-            shifts the rest the opposite way).
-          - Scale the step by the pool size so large pools evolve very slowly.
-          - After normalization, blend a tiny fraction back toward uniform to
-            avoid runaway concentration and keep exploration alive.
-
-        :param cat: weight category key ("dep_airports", "dest_airports", "dates")
-        :param selected: the chosen key inside 'pool' to up/down weight
-        :param delta: signed update signal in [-1.0, 1.0] (from caller)
-                      positive => reward; negative => penalty
-        :param pool: the list of keys available for this draw
-        """
         if len(pool) <= 1 or selected not in pool:
             return
 
-        # Ensure weights exist and are positive
         wcat = self._get_weights()[cat]
         self._init_weights_for_category(cat, pool)
 
-        # Base step sizes (intentionally small; scaled by pool size below)
-        BASE_GOOD = 0.25  # multiplicative step numerator for reward
-        BASE_BAD = 0.35  # multiplicative step numerator for penalty (larger)
-        # Tiny smoothing toward uniform each update
+        BASE_GOOD = 0.25
+        BASE_BAD = 0.35
         SMOOTH_BACK = 0.01
 
         n = len(pool)
         eps = 1e-6
 
-        # Current raw weights and probabilities
         raw = [float(wcat.get(k, 1.0)) for k in pool]
         s = sum(raw)
         if s <= 0.0:
@@ -1836,10 +1795,7 @@ class FlightBotGUI(tk.Tk):
         probs = [r / s for r in raw]
 
         i_sel = pool.index(selected)
-        p_sel = probs[i_sel]
 
-        # Compute a very small multiplicative factor for the selected key.
-        # Scale by pool size so larger pools evolve slower.
         if delta > 0.0:
             step = (BASE_GOOD / n) * min(1.0, delta)
             mult = 1.0 + step
@@ -1849,36 +1805,28 @@ class FlightBotGUI(tk.Tk):
         else:
             mult = 1.0
 
-        # Apply multiplicative change to the selected item's *raw* weight
         raw[i_sel] = max(eps, raw[i_sel] * mult)
 
-        # Renormalize to probabilities
         s2 = sum(raw)
         probs2 = [r / s2 for r in raw]
 
-        # Smooth slightly toward uniform to prevent runaway concentration
         uniform = 1.0 / n
         probs3 = [
             (1.0 - SMOOTH_BACK) * p + SMOOTH_BACK * uniform for p in probs2
         ]
 
-        # Final normalization (guards against numeric drift)
         s3 = sum(probs3)
         if s3 <= 0.0:
             probs3 = [uniform] * n
         else:
             probs3 = [max(eps, p / s3) for p in probs3]
 
-        # Write back as raw weights (we store probabilities; they will be re-normalized on use)
         for key, p in zip(pool, probs3):
             wcat[key] = p
 
         self._save_weights()
 
     def _ensure_date_weights(self, date_keys: list[str]) -> None:
-        """
-        Ensure raw weights exist for all 'date_keys' under category 'dates'.
-        """
         self._init_weights_for_category("dates", date_keys)
 
     def _update_adaptive_after_result(
@@ -1892,30 +1840,9 @@ class FlightBotGUI(tk.Tk):
         result_price: float | None,
         prev_best_price: float | None,
     ) -> None:
-        """
-        Update weights using the *historical percentile* of the found price.
-
-        Reward tiers (lower price = better):
-          • All-time best ever  ................. strongest reward
-          • Top 1% of all recorded prices ...... very strong reward
-          • Top 10% ............................. strong reward
-          • Top 50% (<= median) ................. mild reward
-          • > 50% ............................... tiny penalty
-          • >= 90% (worst decile) ............... small penalty
-          • No valid result ..................... mild penalty
-
-        Notes
-        -----
-        - Updates remain *slow*: `_adjust_weight` scales by pool size and blends
-          back toward uniform each step, so even strong rewards move weights
-          gently.
-        - If we don't have enough history yet (fewer than 5 prices), we fall
-          back to the previous "near previous best" heuristic to avoid noisy jumps.
-        """
         import json
         import os
 
-        # 1) No-result path: tiny penalty, applied to the three families.
         if result_price is None:
             for cat, key, pool in (
                 ("dep_airports", dep_key, deps_pool),
@@ -1925,7 +1852,6 @@ class FlightBotGUI(tk.Tk):
                 self._adjust_weight(cat, key, -1.0, pool)
             return
 
-        # 2) Load historical prices to compute percentiles.
         prices: list[float] = []
         try:
             if os.path.exists(self.record_mgr.path):
@@ -1942,7 +1868,6 @@ class FlightBotGUI(tk.Tk):
         except Exception:
             prices = []
 
-        # 3) If insufficient history, fall back to the older ratio logic (slow).
         if len(prices) < 5 or (
             prev_best_price is None or prev_best_price <= 0
         ):
@@ -1951,22 +1876,21 @@ class FlightBotGUI(tk.Tk):
                 if prev_best_price and prev_best_price > 0
                 else 1.0
             )
-            NEAR_THRESH = 1.02  # within +2% of prev best is "good"
-            WORSE_THRESH = 1.50  # >= +50% worse is "bad"
+            NEAR_THRESH = 1.02
+            WORSE_THRESH = 1.50
 
             if ratio <= NEAR_THRESH:
-                # Reward scaled by closeness to previous best
                 closeness = max(
                     0.0,
                     min(
                         1.0, (NEAR_THRESH - ratio) / (NEAR_THRESH - 1.0 + 1e-9)
                     ),
                 )
-                signal = 0.25 + 0.75 * closeness  # [0.25, 1.0]
+                signal = 0.25 + 0.75 * closeness
             elif ratio >= WORSE_THRESH:
                 signal = -1.0
             else:
-                return  # neutral zone
+                return
 
             for cat, key, pool in (
                 ("dep_airports", dep_key, deps_pool),
@@ -1976,22 +1900,16 @@ class FlightBotGUI(tk.Tk):
                 self._adjust_weight(cat, key, signal, pool)
             return
 
-        # 4) Percentile-based tiers over the *historical* distribution.
         prices_sorted = sorted(p for p in prices if p > 0)
         N = len(prices_sorted)
         hist_min = prices_sorted[0]
 
-        # Percentile rank of current result among historical prices (lower is better).
-        # percent_rank in (0,1]; e.g., 0.10 means in the best 10% historically.
         rank_count = sum(1 for p in prices_sorted if p <= result_price)
         percent_rank = rank_count / N
 
-        # Decile threshold for penalty
         p90 = prices_sorted[int(0.9 * (N - 1))]
 
-        # Stronger rewards for better percentiles; still "slow" via _adjust_weight.
         if result_price < hist_min - 1e-9:
-            # New all-time low
             signal = 1.0
         elif percent_rank <= 0.01:
             signal = 0.85
@@ -2000,7 +1918,6 @@ class FlightBotGUI(tk.Tk):
         elif percent_rank <= 0.50:
             signal = 0.35
         else:
-            # Above median: slight penalty, harsher if in worst decile
             signal = -0.60 if result_price >= p90 else -0.15
 
         for cat, key, pool in (
@@ -2011,40 +1928,20 @@ class FlightBotGUI(tk.Tk):
             self._adjust_weight(cat, key, signal, pool)
 
     def _archive_path(self) -> str:
-        """
-        Return path for TS/surrogate archive JSON.
-        Lives next to config.json as 'ts_archive.json'.
-        """
         cfg_path = getattr(self.config_mgr, "path", "config.json")
         root = os.path.dirname(os.path.abspath(cfg_path))
         return os.path.join(root, "ts_archive.json")
 
     def _archive_load(self) -> dict:
-        """
-        Load discounted per-arm statistics for Thompson Sampling and the
-        additive surrogate.
-
-        File schema:
-        {
-          "gamma": 0.98,
-          "stats": {
-             "DEP|DEST|YYYY-MM-DD|YYYY-MM-DD": {
-                 "mu": float,
-                 "var": float,
-                 "n": float,
-                 "last_date": "YYYY-MM-DD"
-             },
-             ...
-          }
-        }
-        """
         path = self._archive_path()
         try:
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
                     if isinstance(data, dict) and "stats" in data:
-                        if "gamma" not in data or not (0.0 < float(data["gamma"]) < 1.0):
+                        if "gamma" not in data or not (
+                            0.0 < float(data["gamma"]) < 1.0
+                        ):
                             data["gamma"] = 0.98
                         if not isinstance(data["stats"], dict):
                             data["stats"] = {}
@@ -2053,11 +1950,7 @@ class FlightBotGUI(tk.Tk):
             pass
         return {"gamma": 0.98, "stats": {}}
 
-
     def _archive_save(self, arch: dict) -> None:
-        """
-        Persist TS/surrogate archive to disk safely.
-        """
         try:
             path = self._archive_path()
             tmp = path + ".tmp"
@@ -2067,18 +1960,12 @@ class FlightBotGUI(tk.Tk):
         except Exception:
             pass
 
-
-    def _archive_key(self, dep: str, dest: str, dep_date: str, ret_date: str) -> str:
-        """
-        Build a unique key for a (dep, dest, dep_date, ret_date) arm.
-        """
+    def _archive_key(
+        self, dep: str, dest: str, dep_date: str, ret_date: str
+    ) -> str:
         return f"{dep}|{dest}|{dep_date}|{ret_date}"
 
     def _archive_decay(self, arch: dict, today: str) -> None:
-        """
-        Apply day-wise exponential forgetting to all arms based on 'last_date'.
-        If last_date < today, multiply (mu, var, n) by gamma**delta_days.
-        """
         from datetime import datetime as _dt
 
         fmt = "%Y-%m-%d"
@@ -2105,72 +1992,58 @@ class FlightBotGUI(tk.Tk):
                 s["n"] = float(s.get("n", 0.0)) * factor
                 s["last_date"] = today
             except Exception:
-                # If any entry is malformed, drop it defensively.
                 stats.pop(k, None)
         arch["stats"] = stats
 
-
     def _send_notification(self, title: str, message: str) -> None:
         """
-        Robustly send a Windows notification.
-        Handles missing icons and ensures the toaster doesn't crash the thread.
+        Robustly send a Windows system notification toast using plyer.
+        Bypasses legacy setuptools/pkg_resources imports entirely.
         """
         icon_path = self._asset_path("flight_tracker.ico")
         if not os.path.exists(icon_path):
-            icon_path = None  # Fallback to default python icon if custom not found
-        
+            icon_path = None
+
         try:
-            # We create a fresh instance here to ensure thread safety 
-            # and avoid conflicts if previous toasts are still fading.
-            from win10toast import ToastNotifier
-            toaster = ToastNotifier()
-            toaster.show_toast(
-                title,
-                message,
-                icon_path=icon_path,
-                duration=10,
-                threaded=True 
+            from plyer import notification
+
+            notification.notify(
+                title=title, message=message, app_icon=icon_path, timeout=10
             )
         except Exception as e:
             print(f"Notification failed: {e}")
 
-
-    def _archive_add_observation(self, arch: dict, key: str, y: float, today: str) -> None:
-        """
-        Discounted online update of per-arm statistics.
-        Uses an EWMA for mean and variance (Bessel-free), and a discounted 'n'.
-
-        If the arm is new, initialize with mu=y, var=1.0 (unit noise), n=1.0.
-        """
+    def _archive_add_observation(
+        self, arch: dict, key: str, y: float, today: str
+    ) -> None:
         gamma = float(arch.get("gamma", 0.98))
         stats = arch.setdefault("stats", {})
-        s = stats.get(key, {"mu": float(y), "var": 1.0, "n": 1.0, "last_date": today})
+        s = stats.get(
+            key, {"mu": float(y), "var": 1.0, "n": 1.0, "last_date": today}
+        )
 
-        # Apply same-day decay to keep consistency (no-op if last_date == today).
         self._archive_decay(arch, today)
         mu_prev = float(s.get("mu", float(y)))
         var_prev = float(s.get("var", 1.0))
         n_prev = float(s.get("n", 0.0))
 
-        alpha = 1.0 - gamma  # EWMA step
+        alpha = 1.0 - gamma
         mu_new = gamma * mu_prev + alpha * float(y)
-        # EWMA variance around evolving mean
         var_new = gamma * var_prev + alpha * (float(y) - mu_new) ** 2
         n_new = gamma * n_prev + 1.0
 
-        s.update({"mu": mu_new, "var": max(1e-6, var_new), "n": n_new, "last_date": today})
+        s.update(
+            {
+                "mu": mu_new,
+                "var": max(1e-6, var_new),
+                "n": n_new,
+                "last_date": today,
+            }
+        )
         stats[key] = s
         arch["stats"] = stats
 
     def _fit_additive_surrogate(self, arch: dict) -> tuple[dict, dict, dict]:
-        """
-        Fit a very light additive surrogate:
-            f(dep, dest, date) ~= alpha(dep) + beta(dest) + gamma(date)
-
-        We use each arm's discounted mean as a target, weighted by its discounted n.
-        Returns (alpha_map, beta_map, gamma_map) as dictionaries of scores.
-        Unseen items simply do not appear and will be treated as 0 in scoring.
-        """
         import numpy as np
 
         stats = arch.get("stats", {})
@@ -2205,7 +2078,6 @@ class FlightBotGUI(tk.Tk):
         m = len(y_list)
         p = len(uniq_dep) + len(uniq_dest) + len(uniq_date)
 
-        # Design matrix for ridge on additive effects: [I_dep | I_dest | I_date]
         X = np.zeros((m, p), dtype=float)
         y = np.array(y_list, dtype=float)
         w = np.array(w_list, dtype=float)
@@ -2215,8 +2087,6 @@ class FlightBotGUI(tk.Tk):
             X[r, len(uniq_dep) + idx_dest[dest]] = 1.0
             X[r, len(uniq_dep) + len(uniq_dest) + idx_date[date]] = 1.0
 
-        # Weighted ridge: (X^T W X + lambda I)^{-1} X^T W y
-        # Use small ridge to stabilize (lambda=1e-3).
         lam = 1e-3
         W = np.diag(w) if np.all(w >= 0.0) else np.eye(m)
         XtW = X.T @ W
@@ -2227,14 +2097,11 @@ class FlightBotGUI(tk.Tk):
         except np.linalg.LinAlgError:
             coef = np.linalg.lstsq(A, b, rcond=None)[0]
 
-        alpha = {
-            d: float(coef[idx_dep[d]]) for d in uniq_dep
-        }
-        beta = {
-            d: float(coef[len(uniq_dep) + idx_dest[d]]) for d in uniq_dest
-        }
+        alpha = {d: float(coef[idx_dep[d]]) for d in uniq_dep}
+        beta = {d: float(coef[len(uniq_dep) + idx_dest[d]]) for d in uniq_dest}
         gamma = {
-            d: float(coef[len(uniq_dep) + len(uniq_dest) + idx_date[d]]) for d in uniq_date
+            d: float(coef[len(uniq_dep) + len(uniq_dest) + idx_date[d]])
+            for d in uniq_date
         }
         return alpha, beta, gamma
 
@@ -2249,16 +2116,6 @@ class FlightBotGUI(tk.Tk):
         random_floor_frac: float = 0.10,
         beam_k: int = 20,
     ) -> list[tuple[str, str, str, str]]:
-        """
-        Propose up to q (dep, dest, dep_date, ret_date) candidates using:
-          - Thompson Sampling on previously seen arms (exploit + explore via variance)
-          - Additive surrogate + beam search to score unseen arms
-          - A small random floor to never fully discard options
-
-        IMPORTANT: The Thompson-sampling stage is now *strictly filtered* to the current
-        pools and date window. It will *not* return old dates or airports that are no
-        longer present in the config.
-        """
         import heapq
         from datetime import datetime as _dt
         from datetime import timedelta as _td
@@ -2272,38 +2129,32 @@ class FlightBotGUI(tk.Tk):
             except Exception:
                 return dd
 
-        # Normalize / precompute sets for fast membership checks
         deps_set = set(deps_pool or [])
         dests_set = set(dests_pool or [])
         dates_set = set(dates_pool or [])
 
-        # Map each allowed departure date to the set of allowed return dates, so
-        # sampled archive arms are also constrained by the *current* durations.
         allowed_rd_by_dd: dict[str, set[str]] = {}
         if dates_pool and durations:
             for dd in dates_pool:
-                allowed_rd_by_dd[dd] = { _ret_date(dd, d) for d in set(int(x) for x in durations) }
+                allowed_rd_by_dd[dd] = {
+                    _ret_date(dd, d) for d in set(int(x) for x in durations)
+                }
 
-        # -----------------------------
-        # 1) Thompson on *filtered* arms
-        # -----------------------------
         seen_candidates: list[tuple[float, tuple[str, str, str, str]]] = []
         stats = arch.get("stats", {}) or {}
 
         for k, s in stats.items():
             try:
                 dep, dest, dd, rd = k.split("|")
-            except Exception:
+            except ValueError:
                 continue
 
-            # Enforce the current pools (airports + departure dates)
             if deps_set and dep not in deps_set:
                 continue
             if dests_set and dest not in dests_set:
                 continue
             if dates_set and dd not in dates_set:
                 continue
-            # Enforce current durations: rd must match one of the allowed returns for dd
             if dates_set and durations:
                 rds_allowed = allowed_rd_by_dd.get(dd)
                 if rds_allowed is None or rd not in rds_allowed:
@@ -2314,19 +2165,18 @@ class FlightBotGUI(tk.Tk):
                 var = max(1e-6, float(s.get("var", 1.0)))
                 n = max(0.0, float(s.get("n", 0.0)))
                 post_var = var / (n + 1.0)
-                sample = np.random.normal(loc=mu, scale=max(1e-6, np.sqrt(post_var)))
+                sample = np.random.normal(
+                    loc=mu, scale=max(1e-6, np.sqrt(post_var))
+                )
             except Exception:
                 continue
 
             seen_candidates.append((sample, (dep, dest, dd, rd)))
 
-        seen_candidates.sort(key=lambda t: t[0])  # lower sampled price is better
+        seen_candidates.sort(key=lambda t: t[0])
         q_seen = int(q * 0.6)
         picked = [cand for _s, cand in seen_candidates[:q_seen]]
 
-        # ---------------------------------------
-        # 2) Additive surrogate for *unseen* arms
-        # ---------------------------------------
         alpha, beta, gamma = self._fit_additive_surrogate(arch)
 
         def _topk(dct: dict, k: int, universe: list[str]) -> list[str]:
@@ -2335,7 +2185,7 @@ class FlightBotGUI(tk.Tk):
             if not dct:
                 return universe[: min(k, len(universe))]
             items = [(dct.get(x, 0.0), x) for x in universe]
-            items.sort(key=lambda t: t[0])  # lower score (price) is better
+            items.sort(key=lambda t: t[0])
             return [x for _score, x in items[: min(k, len(items))]]
 
         top_dep = _topk(alpha, beam_k, deps_pool)
@@ -2350,19 +2200,21 @@ class FlightBotGUI(tk.Tk):
                 for dd in top_dates:
                     g_score = gamma.get(dd, 0.0)
 
-                    # choose a small set of durations to diversify
                     if not durations:
                         dur_list = [0]
                     else:
                         durs_sorted = sorted(set(int(x) for x in durations))
                         mid = durs_sorted[len(durs_sorted) // 2]
-                        dur_list = [durs_sorted[0], mid] if len(durs_sorted) > 1 else [durs_sorted[0]]
+                        dur_list = (
+                            [durs_sorted[0], mid]
+                            if len(durs_sorted) > 1
+                            else [durs_sorted[0]]
+                        )
 
                     for dur in dur_list:
                         rd = _ret_date(dd, dur)
                         key = self._archive_key(d, b, dd, rd)
                         if key in stats:
-                            # already considered by TS stage; skip duplication
                             continue
                         score = a_score + b_score + g_score
                         heapq.heappush(heap, (score, (d, b, dd, rd)))
@@ -2375,9 +2227,6 @@ class FlightBotGUI(tk.Tk):
 
         picked.extend(surrogate_pick)
 
-        # ---------------------------
-        # 3) Random floor (exploration)
-        # ---------------------------
         q_rand = max(1, int(q * random_floor_frac))
         rng = random.Random()
         rand_added = 0
@@ -2398,7 +2247,6 @@ class FlightBotGUI(tk.Tk):
                 picked.append(cand)
                 rand_added += 1
 
-        # Deduplicate and cap to q
         seen = set()
         out: list[tuple[str, str, str, str]] = []
         for dep, dest, dd, rd in picked:
@@ -2411,27 +2259,7 @@ class FlightBotGUI(tk.Tk):
                 break
         return out
 
-
-
     def _show_ts_archive_popup(self, event=None):
-        """
-        Open a simple, non-technical popup that explains what has been learned so far.
-
-        The popup shows:
-          - A short help text in plain English.
-          - A small chart of "how many trip options were updated each day".
-          - The current "Top departures", "Top destinations", and "Top departure dates"
-            ranked by their typical recent price (lower is better).
-          - The "Top trip options" (route + dates) by typical recent price.
-
-        Notes:
-          - "Typical recent price" means the system averages prices while giving more
-            importance to recent checks. This helps follow changing prices.
-          - "Number of recent checks" is how many times we recently looked at that
-            item (also weighted to favor recent checks).
-          - "Price spread" is how much the price tends to bounce around: smaller
-            means more stable, larger means more variable.
-        """
         import json
         import os
         import tkinter as _tk
@@ -2442,12 +2270,11 @@ class FlightBotGUI(tk.Tk):
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         from matplotlib.figure import Figure
 
-        # Load archive from disk
         arch_path = self._archive_path()
         if not os.path.exists(arch_path):
             _tk.messagebox.showinfo(
                 "Learning Overview",
-                "No data yet. Let the monitor run a bit, then try again."
+                "No data yet. Let the monitor run a bit, then try again.",
             )
             return
 
@@ -2457,14 +2284,13 @@ class FlightBotGUI(tk.Tk):
         except Exception:
             _tk.messagebox.showerror(
                 "Learning Overview",
-                "Could not read the learning file (ts_archive.json)."
+                "Could not read the learning file (ts_archive.json).",
             )
             return
 
         stats = arch.get("stats", {})
-        forget_rate = arch.get("gamma", 0.98)  # closer to 1.0 = slower forgetting
+        forget_rate = arch.get("gamma", 0.98)
 
-        # Aggregate helpful summaries (weighted by "recent checks")
         dep_scores = defaultdict(list)
         dest_scores = defaultdict(list)
         date_scores = defaultdict(list)
@@ -2476,9 +2302,8 @@ class FlightBotGUI(tk.Tk):
             except ValueError:
                 continue
 
-            typical = float(s.get("mu", 0.0))      # typical recent price estimate
-            checks = float(s.get("n", 0.0))        # recent checks weight
-            spread = float(s.get("var", 0.0))      # price variability estimate
+            typical = float(s.get("mu", 0.0))
+            checks = float(s.get("n", 0.0))
 
             dep_scores[dep].append((typical, checks))
             dest_scores[dest].append((typical, checks))
@@ -2489,20 +2314,20 @@ class FlightBotGUI(tk.Tk):
                 updates_per_day[last] += 1
 
         def _reduce(bucket):
-            # Compute weighted average "typical recent price" per item
             out = []
             for k, lst in bucket.items():
                 wsum = sum(n for _mu, n in lst)
-                avg = (sum(mu * n for mu, n in lst) / wsum) if wsum > 0 else 0.0
+                avg = (
+                    (sum(mu * n for mu, n in lst) / wsum) if wsum > 0 else 0.0
+                )
                 out.append((avg, wsum, k))
-            out.sort(key=lambda t: t[0])  # lower is better
+            out.sort(key=lambda t: t[0])
             return out
 
         dep_top = _reduce(dep_scores)[:10]
         dest_top = _reduce(dest_scores)[:10]
         date_top = _reduce(date_scores)[:10]
 
-        # Build list of top trip options (by typical recent price)
         trips = []
         for key, s in stats.items():
             typical = float(s.get("mu", 0.0))
@@ -2512,14 +2337,12 @@ class FlightBotGUI(tk.Tk):
         trips.sort(key=lambda t: t[0])
         trips_top = trips[:20]
 
-        # Create popup
         win = _tk.Toplevel(self)
         win.title("Learning Overview (press F12 to open)")
         win.geometry("980x760")
         win.transient(self)
         win.grab_set()
 
-        # Header with plain-language help
         header = _tk.LabelFrame(win, text="What you are seeing")
         header.pack(fill="x", padx=10, pady=8)
 
@@ -2530,18 +2353,20 @@ class FlightBotGUI(tk.Tk):
             "- Price spread: how much it tends to vary (smaller = more stable).\n"
             "Nothing is ever fully discarded: the app still tries new options regularly."
         )
-        _tk.Label(header, text=help_txt, justify="left").pack(anchor="w", padx=8, pady=6)
+        _tk.Label(header, text=help_txt, justify="left").pack(
+            anchor="w", padx=8, pady=6
+        )
 
-        # Archive summary line
         summary = _tk.Frame(win)
         summary.pack(fill="x", padx=10, pady=(0, 8))
         _tk.Label(
             summary,
-            text=f"Saved options: {len(stats)}    Forgetting speed: {forget_rate} (closer to 1.0 = slower)"
+            text=f"Saved options: {len(stats)}    Forgetting speed: {forget_rate} (closer to 1.0 = slower)",
         ).pack(anchor="w")
 
-        # Plot updates per day
-        plot_frame = _tk.LabelFrame(win, text="How many options were updated each day")
+        plot_frame = _tk.LabelFrame(
+            win, text="How many options were updated each day"
+        )
         plot_frame.pack(fill="both", padx=10, pady=(0, 10), expand=False)
 
         if updates_per_day:
@@ -2561,20 +2386,27 @@ class FlightBotGUI(tk.Tk):
                 canvas.draw()
                 canvas.get_tk_widget().pack(fill="x", padx=8, pady=6)
             except Exception:
-                _tk.Label(plot_frame, text="Chart could not be drawn.").pack(padx=10, pady=8)
+                _tk.Label(plot_frame, text="Chart could not be drawn.").pack(
+                    padx=10, pady=8
+                )
         else:
-            _tk.Label(plot_frame, text="No updates recorded yet.").pack(padx=10, pady=8)
+            _tk.Label(plot_frame, text="No updates recorded yet.").pack(
+                padx=10, pady=8
+            )
 
-        # Paned area for tables
         paned = _ttk.Panedwindow(win, orient="vertical")
         paned.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # Factors table (departures, destinations, dates)
-        fac_frame = _tk.LabelFrame(paned, text="Good places and dates (ranked by typical recent price)")
+        fac_frame = _tk.LabelFrame(
+            paned,
+            text="Good places and dates (ranked by typical recent price)",
+        )
         paned.add(fac_frame, weight=1)
 
         cols = ("typical_price", "recent_checks", "code_or_date", "type")
-        tree = _ttk.Treeview(fac_frame, columns=cols, show="headings", height=10)
+        tree = _ttk.Treeview(
+            fac_frame, columns=cols, show="headings", height=10
+        )
         headings = (
             "Typical recent price (EUR)",
             "Number of recent checks",
@@ -2583,7 +2415,9 @@ class FlightBotGUI(tk.Tk):
         )
         for c, h in zip(cols, headings):
             tree.heading(c, text=h)
-            tree.column(c, width=190 if c == "typical_price" else 160, anchor="center")
+            tree.column(
+                c, width=190 if c == "typical_price" else 160, anchor="center"
+            )
         tree.pack(fill="both", expand=True, padx=6, pady=6)
 
         def _fmt_eur(x):
@@ -2593,18 +2427,41 @@ class FlightBotGUI(tk.Tk):
                 return str(x)
 
         for avg, n, code in dep_top:
-            tree.insert("", "end", values=(_fmt_eur(avg), f"{n:.2f}", code, "Departure"))
+            tree.insert(
+                "",
+                "end",
+                values=(_fmt_eur(avg), f"{n:.2f}", code, "Departure"),
+            )
         for avg, n, code in dest_top:
-            tree.insert("", "end", values=(_fmt_eur(avg), f"{n:.2f}", code, "Destination"))
+            tree.insert(
+                "",
+                "end",
+                values=(_fmt_eur(avg), f"{n:.2f}", code, "Destination"),
+            )
         for avg, n, code in date_top:
-            tree.insert("", "end", values=(_fmt_eur(avg), f"{n:.2f}", code, "Departure date"))
+            tree.insert(
+                "",
+                "end",
+                values=(_fmt_eur(avg), f"{n:.2f}", code, "Departure date"),
+            )
 
-        # Trips table (top specific options)
-        trips_frame = _tk.LabelFrame(paned, text="Top trip options by typical recent price")
+        trips_frame = _tk.LabelFrame(
+            paned, text="Top trip options by typical recent price"
+        )
         paned.add(trips_frame, weight=2)
 
-        a_cols = ("typical_price", "recent_checks", "price_spread", "from", "to", "dep_date", "ret_date")
-        a_tree = _ttk.Treeview(trips_frame, columns=a_cols, show="headings", height=12)
+        a_cols = (
+            "typical_price",
+            "recent_checks",
+            "price_spread",
+            "from",
+            "to",
+            "dep_date",
+            "ret_date",
+        )
+        a_tree = _ttk.Treeview(
+            trips_frame, columns=a_cols, show="headings", height=12
+        )
 
         a_headings = (
             "Typical recent price (EUR)",
@@ -2617,7 +2474,15 @@ class FlightBotGUI(tk.Tk):
         )
         for c, h in zip(a_cols, a_headings):
             a_tree.heading(c, text=h)
-            a_tree.column(c, width=170 if c in ("typical_price", "recent_checks", "price_spread") else 120, anchor="center")
+            a_tree.column(
+                c,
+                width=(
+                    170
+                    if c in ("typical_price", "recent_checks", "price_spread")
+                    else 120
+                ),
+                anchor="center",
+            )
         a_tree.pack(fill="both", expand=True, padx=6, pady=6)
 
         for typical, checks, spread, key in trips_top:
@@ -2639,28 +2504,10 @@ class FlightBotGUI(tk.Tk):
                 ),
             )
 
-        # Close button
         btn = _tk.Button(win, text="Close", command=win.destroy)
         btn.pack(pady=8)
 
-
     def _archive_bootstrap_from_records(self, arch: dict) -> None:
-        """
-        Retroactively and incrementally feed the Thompson/surrogate archive from
-        'flight_records.jsonl'. We process records in chronological order and
-        update per-arm stats using the record's calendar day as the observation
-        date (enables discounted forgetting over time).
-
-        The method is incremental: it remembers the last processed timestamp
-        ('last_bootstrap_ts') and only ingests newer records on subsequent calls.
-
-        Notes
-        -----
-        - An arm key is DEP|DEST|dep_date|arrival_date. Records missing either
-          dep_date or arrival_date are skipped.
-        - Timestamp field may be 'datetime' (YYYY-MM-DD-HH) or 'date' (YYYY-MM-DD).
-        - Price must parse to float and be positive.
-        """
         import json
         import os
         from datetime import datetime as _dt
@@ -2669,12 +2516,8 @@ class FlightBotGUI(tk.Tk):
         if not os.path.exists(path):
             return
 
-        # Load last processed timestamp (string comparable due to fixed formatting).
         last_ts = arch.get("last_bootstrap_ts", "")
-
-        # Collect eligible rows
         rows: list[tuple[str, str, str, str, str, float]] = []
-        # tuple: (ts_iso, dep, dest, dep_date, arrival_date, price)
 
         with open(path, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -2687,20 +2530,15 @@ class FlightBotGUI(tk.Tk):
                 if not ts_str:
                     continue
 
-                # Normalize timestamp string to YYYY-MM-DD-HH for ordering
-                # If only a date is present, use hour "00".
                 try:
                     if len(ts_str.split("-")) == 4:
-                        # Already YYYY-MM-DD-HH
                         ts_norm = ts_str
                     else:
-                        # Parse as date, reformat with HH=00
                         t = _dt.strptime(ts_str, "%Y-%m-%d")
                         ts_norm = t.strftime("%Y-%m-%d-00")
                 except Exception:
                     continue
 
-                # Incremental ingestion: only newer than last_ts
                 if last_ts and not (ts_norm > last_ts):
                     continue
 
@@ -2724,24 +2562,16 @@ class FlightBotGUI(tk.Tk):
         if not rows:
             return
 
-        # Sort by timestamp ascending for correct day-wise discounting behavior
         rows.sort(key=lambda r: r[0])
 
-        # Feed archive one by one, using the record's calendar day as the update day
         for ts_norm, dep, dest, dd, rd, price_f in rows:
-            # Extract the calendar day "YYYY-MM-DD" from normalized ts
             day = ts_norm[:10]
             key = self._archive_key(dep, dest, dd, rd)
-            # Update the archive with the observation at 'day'
             self._archive_add_observation(arch, key, price_f, day)
 
-        # Remember the last processed timestamp
         arch["last_bootstrap_ts"] = rows[-1][0]
+
     def _records_last_day(self) -> str | None:
-        """
-        Return the last calendar day 'YYYY-MM-DD' present in flight_records.jsonl,
-        or None if unavailable. Safe utility, not required by the bootstrap.
-        """
         import json
         import os
         from datetime import datetime as _dt
@@ -2758,104 +2588,64 @@ class FlightBotGUI(tk.Tk):
                     ts_str = rec.get("datetime") or rec.get("date")
                     if not ts_str:
                         continue
-                    # Normalize to date
                     if len(ts_str.split("-")) == 4:
                         day = ts_str[:10]
                     else:
-                        _dt.strptime(ts_str, "%Y-%m-%d")  # validate
+                        _dt.strptime(ts_str, "%Y-%m-%d")
                         day = ts_str
                     last_day = day
                 except Exception:
                     continue
         return last_day
 
-    def _choose_annotation_offset(self, px: float, py: float) -> tuple[tuple[int, int], str, str]:
-        """
-        Choose a tooltip offset and text alignment so the annotation bubble is less
-        likely to be cropped by the window.
-
-        We do this heuristically using the mouse position (in display pixels) and
-        the axes bounding box. Near the right edge we prefer a leftward offset, near
-        the top we prefer a downward offset, etc.
-
-        Returns:
-            (xytext_offset, ha, va)
-            - xytext_offset: (dx, dy) in pixels for Annotation.xytext
-            - ha: 'left' or 'right'
-            - va: 'bottom' or 'top'
-        """
-        # Axes bbox in display coords
+    def _choose_annotation_offset(
+        self, px: float, py: float
+    ) -> tuple[tuple[int, int], str, str]:
         axbb = self.ax.get_window_extent()
         x0, y0 = axbb.x0, axbb.y0
         x1, y1 = axbb.x1, axbb.y1
         w = max(1.0, x1 - x0)
         h = max(1.0, y1 - y0)
 
-        # Three horizontal and vertical zones
         left_zone = x0 + 0.33 * w
         right_zone = x0 + 0.66 * w
         low_zone = y0 + 0.33 * h
         high_zone = y0 + 0.66 * h
 
-        # Default offsets (pointing to top-right of the data point)
         dx, dy = 10, 10
         ha, va = "left", "bottom"
 
-        # Horizontal choice
         if px >= right_zone:
-            # Too close to right edge: place bubble to the left
             dx = -10
             ha = "right"
         elif px <= left_zone:
-            # Comfortable on the left: keep bubble to the right
             dx = 10
             ha = "left"
         else:
-            # Middle band: prefer right
             dx = 10
             ha = "left"
 
-        # Vertical choice
         if py >= high_zone:
-            # Near top: place bubble below the point
             dy = -10
             va = "top"
         elif py <= low_zone:
-            # Near bottom: place bubble above the point
             dy = 10
             va = "bottom"
         else:
-            # Middle band: prefer above
             dy = 10
             va = "bottom"
 
         return (dx, dy), ha, va
 
-    def _parse_forbidden_intervals(self, s: str) -> list[tuple[datetime, datetime]]:
-        """
-        Parse a comma-separated list of inclusive date intervals into datetime tuples.
-
-        Input format:
-          YYYY-MM-DD-YYYY-MM-DD[, YYYY-MM-DD-YYYY-MM-DD, ...]
-
-        Rules:
-          - Whitespace is ignored around items.
-          - Each item must be exactly two YYYY-MM-DD dates separated by a single dash.
-            Example: 2025-12-20-2025-12-27
-          - Start and end must be valid calendar dates.
-          - If end < start, they are swapped.
-          - Returns a list of (start_dt, end_dt), inclusive.
-
-        Raises:
-          ValueError on malformed entries.
-        """
+    def _parse_forbidden_intervals(
+        self, s: str
+    ) -> list[tuple[datetime, datetime]]:
         s = (s or "").strip()
         if not s:
             return []
 
         out: list[tuple[datetime, datetime]] = []
         parts = [p.strip() for p in s.split(",") if p.strip()]
-        # Regex captures two dates separated by a single dash between them
         pat = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})-(\d{4}-\d{2}-\d{2})\s*$")
 
         for part in parts:
@@ -2876,31 +2666,18 @@ class FlightBotGUI(tk.Tk):
         return out
 
     def _parse_codes_from_display(self, s: str) -> list[str]:
-        """
-        Extract IATA codes from a display string that may contain entries like
-        'CDG - Charles de Gaulle International Airport, ORY - Paris-Orly' or
-        plain comma-separated IATA codes like 'CDG, ORY'.
-
-        Returns:
-            A list of 3-letter uppercase IATA codes found in the string.
-        """
         s = (s or "").strip()
         if not s:
             return []
         parts = [p.strip() for p in s.split(",") if p.strip()]
         codes: list[str] = []
         for p in parts:
-            # Case 1: 'ABC - ...'
             if re.match(r"^[A-Z]{3}\s*-\s*", p):
                 codes.append(p.split("-", 1)[0].strip())
                 continue
-            # Case 2: plain IATA
             if len(p) == 3 and p.isalpha() and p.isupper():
                 codes.append(p)
         return codes
-
-
-
 
 
 if __name__ == "__main__":

@@ -19,7 +19,6 @@ from selenium.common.exceptions import (ElementClickInterceptedException,
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from win10toast import ToastNotifier
 
 
 class FlightBot:
@@ -45,7 +44,6 @@ class FlightBot:
             f"{departure}-{destination}/"
             f"{dep_date}/{arrival_date}?sort=bestflight_a"
         )
-        self.notifier = ToastNotifier()
         self.cancel_event = cancel_event
         self._driver = None
         self.buy_direct = buy_direct

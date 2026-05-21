@@ -13,10 +13,10 @@
 			"file_regex": "^(..[^:]*):([0-9]+):?([0-9]+)?:? (.*)$",
 			"cancel": "terminus_cancel_build",
 			"linux": {
-				"shell_cmd": "python3 -m flight_tracker"
+				"shell_cmd": "${project_path:${folder}}/env/bin/python -m flight_tracker"
 			},
 			"windows": {
-				"shell_cmd": "python -m flight_tracker"
+				"shell_cmd": "${project_path:${folder}}/env/Scripts/python.exe -m flight_tracker"
 			},
 			"working_dir": "${project_path:${folder}}"
 		},
@@ -64,6 +64,21 @@
 				"shell_cmd": "python -m pip install -e ."
 			},
 			"working_dir": "${project_path:${folder}}"
-		}
+		},
+		{
+			"name": "Clean - Flight Tracker",
+			"target": "terminus_exec",
+			"focus": true,
+			"timeit": false,
+			"file_regex": "^(..[^:]*):([0-9]+):?([0-9]+)?:? (.*)$",
+			"cancel": "terminus_cancel_build",
+			"linux": {
+				"shell_cmd": "python3 clean.py"
+			},
+			"windows": {
+				"shell_cmd": "python clean.py"
+			},
+			"working_dir": "${project_path:${folder}}"
+		},
 	]
 }
