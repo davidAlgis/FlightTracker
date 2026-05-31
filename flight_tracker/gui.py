@@ -46,7 +46,7 @@ class FlightBotGUI(tk.Tk):
     """Tkinter GUI for configuring and running FlightBot with system-tray support."""
 
     def __init__(self):
-        # Fix 2: Force Taskbar ID grouping immediately on instantiation
+        # Explicitly identify process AppUserModelID to force Windows Taskbar icon grouping
         if os.name == "nt":
             import ctypes
             try:
@@ -400,11 +400,9 @@ class FlightBotGUI(tk.Tk):
         Load IATA->airport-name map from OurAirports CSV asynchronously to prevent startup hang.
         """
         def _async_load_worker():
-            import ssl
-            import urllib.error
             df = None
-            
             try:
+                import ssl
                 context = ssl._create_unverified_context()
                 df = pd.read_csv(AirportFromDistance.AIRPORTS_URL)
             except Exception:
@@ -900,7 +898,7 @@ class FlightBotGUI(tk.Tk):
 
     def _monitor_loop(self, deps, dests, pairs, params):
         """
-        Continuous monitoring with quiet offline handling.
+        Continuous monitoring with quiet thread-safe GUI management.
         """
         from datetime import datetime
 
@@ -941,8 +939,9 @@ class FlightBotGUI(tk.Tk):
 
         try:
             while not self._stop_event.is_set():
-                self.status_label.config(text="Status: checking flights...")
-                self.progress.start()
+                # Safe GUI Dispatches via self.after() to eliminate locks
+                self.after(0, lambda: self.status_label.config(text="Status: checking flights..."))
+                self.after(0, self.progress.start)
 
                 if random_mode:
                     deps_pool = list(deps)
@@ -992,9 +991,9 @@ class FlightBotGUI(tk.Tk):
                         if self._stop_event.is_set():
                             break
 
-                        self.status_label.config(
-                            text=f"Checking {dep}->{dest} on {dd} -> {rd}"
-                        )
+                        msg = f"Checking {dep}->{dest} on {dd} -> {rd}"
+                        self.after(0, lambda m=msg: self.status_label.config(text=m))
+                        
                         bot = FlightBot(
                             departure=dep,
                             destination=dest,
@@ -1018,12 +1017,7 @@ class FlightBotGUI(tk.Tk):
                             break
 
                         if is_offline:
-                            try:
-                                self.status_label.config(
-                                    text="Status: offline, retrying in 60s"
-                                )
-                            except Exception:
-                                pass
+                            self.after(0, lambda: self.status_label.config(text="Status: offline, retrying in 60s"))
                             for _s in range(OFFLINE_WAIT_SEC):
                                 if self._stop_event.is_set():
                                     break
@@ -1086,8 +1080,8 @@ class FlightBotGUI(tk.Tk):
                         if best_for_pair is None or price < best_for_pair:
                             self.best_prices[(dep, dest)] = price
 
-                        self._load_historic_best()
-                        self._plot_history()
+                        self.after(0, self._load_historic_best)
+                        self.after(0, self._plot_history)
 
                 else:
                     dep_ret_pairs = pairs or []
@@ -1100,9 +1094,9 @@ class FlightBotGUI(tk.Tk):
                             if _overlaps_forbidden(dd, rd):
                                 continue
 
-                            self.status_label.config(
-                                text=f"Checking {dep}->{dest} on {dd} -> {rd}"
-                            )
+                            msg = f"Checking {dep}->{dest} on {dd} -> {rd}"
+                            self.after(0, lambda m=msg: self.status_label.config(text=m))
+                            
                             bot = FlightBot(
                                 departure=dep,
                                 destination=dest,
@@ -1128,12 +1122,7 @@ class FlightBotGUI(tk.Tk):
                                 break
 
                             if is_offline:
-                                try:
-                                    self.status_label.config(
-                                        text="Status: offline, retrying in 60s"
-                                    )
-                                except Exception:
-                                    pass
+                                self.after(0, lambda: self.status_label.config(text="Status: offline, retrying in 60s"))
                                 for _s in range(OFFLINE_WAIT_SEC):
                                     if self._stop_event.is_set():
                                         break
@@ -1177,22 +1166,22 @@ class FlightBotGUI(tk.Tk):
                                     f"{dep}->{dest} ({dd}): {price:.2f} EUR (Within {notify_percent}% of {global_prev:.2f})",
                                 )
 
-                            self._load_historic_best()
-                            self._plot_history()
+                            self.after(0, self._load_historic_best)
+                            self.after(0, self._plot_history)
 
                         if best_for_pair is not None:
                             self.best_prices[(dep, dest)] = best_for_pair
                         if self._stop_event.is_set():
                             break
 
-                self.progress.stop()
-                self.status_label.config(text="Status: continuing...")
+                self.after(0, self.progress.stop)
+                self.after(0, lambda: self.status_label.config(text="Status: continuing..."))
 
         finally:
             self._current_bot = None
 
-        self.progress.stop()
-        self.status_label.config(text="Status: idle")
+        self.after(0, self.progress.stop)
+        self.after(0, lambda: self.status_label.config(text="Status: idle"))
         print("Monitoring loop ended.")
 
     def _filter_airports(self):
@@ -1720,7 +1709,6 @@ class FlightBotGUI(tk.Tk):
 
         if getattr(sys, "frozen", False):
             root = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-            # Fix 3: Scan both the folder mirror and root directory structures
             path_dir = os.path.join(root, "assets", *parts)
             if os.path.exists(path_dir):
                 return path_dir
