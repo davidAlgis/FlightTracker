@@ -504,12 +504,38 @@ class FlightBotGUI(tk.Tk):
             return False
         return True
 
+    def _auto_fill_trip_duration(self):
+        """Automatically calculates and populates Trip Duration if empty."""
+        dep_str = self._get_widget_value(self.entries["dep_date"])
+        arr_str = self._get_widget_value(self.entries["arrival_date"])
+        dur_str = self._get_widget_value(self.entries["trip_duration"])
+
+        if not dur_str and dep_str and arr_str:
+            # Check standard date length pattern before intensive parsing to avoid UI lag
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", dep_str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", arr_str):
+                try:
+                    dep_dt = datetime.strptime(dep_str, "%Y-%m-%d")
+                    arr_dt = datetime.strptime(arr_str, "%Y-%m-%d")
+                    if arr_dt >= dep_dt:
+                        days = (arr_dt - dep_dt).days
+                        widget = self.entries["trip_duration"]
+                        if isinstance(widget, tk.Text):
+                            widget.delete("1.0", END)
+                            widget.insert("1.0", str(days))
+                        else:
+                            widget.delete(0, END)
+                            widget.insert(0, str(days))
+                except ValueError:
+                    pass
+
     def _on_fields_changed(self):
         """
         Stop monitoring if fields become incomplete.
         Do NOT auto-start if fields become complete, unless explicitly allowed.
         After a user cancel, auto-start is disabled until user clicks Start.
         """
+        self._auto_fill_trip_duration()
+
         alive = self._monitor_thread and self._monitor_thread.is_alive()
         if not self._fields_complete() and alive:
             self._stop_event.set()
