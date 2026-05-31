@@ -98,6 +98,12 @@ def install_requirements(pip_bin: Path) -> None:
 
 def build_with_pyinstaller(py_bin: Path, pip_bin: Path) -> None:
     """Freeze the app cleanly into a directory bundle using PyInstaller."""
+    # Strict validation check to ensure icon file is present before compilation
+    if not ICON_PATH.exists():
+        print(f"[ERROR] Icon target file asset not found at path location: {ICON_PATH}")
+        print("Please verify the target .ico file is present inside your assets/ dir.")
+        sys.exit(1)
+
     print("[FREEZE] Installing PyInstaller compilation toolset...")
     subprocess.check_call([pip_bin, "install", "pyinstaller"])
 
@@ -114,17 +120,19 @@ def build_with_pyinstaller(py_bin: Path, pip_bin: Path) -> None:
     print(
         "[FREEZE] Compiling standalone application executable bundle via PyInstaller..."
     )
+    
+    # Separated flags and parameters to avoid path string coercion interpretation faults
     cmd = [
         str(py_bin),
         "-m",
         "PyInstaller",
-        "--noconsole",  # No terminal window display popup
-        "--name=Flight Tracker",  # Target binary compilation name
-        f"--paths={ROOT_DIR}",  # Explicitly map workspace base folder paths
-        f"--icon={ICON_PATH}",  # Standalone window binary shell icon
-        f"--add-data={ASSETS_DIR}{os.path.pathsep}assets",  # Pack local images asset filesystem mirror
-        f"--distpath={ROOT_DIR / 'dist'}",  # Output staging target
-        f"--workpath={ROOT_DIR / 'build_tmp'}",  # Isolation directory workspace
+        "--noconsole",                           # No terminal window display popup
+        "--name", "Flight Tracker",              # Target binary compilation name
+        "--paths", str(ROOT_DIR),                # Explicitly map workspace base folder paths
+        "--icon", str(ICON_PATH),                # Standalone window binary shell icon
+        "--add-data", f"{ASSETS_DIR}{os.path.pathsep}assets",  # Pack local images asset filesystem mirror
+        "--distpath", str(ROOT_DIR / 'dist'),    # Output staging target
+        "--workpath", str(ROOT_DIR / 'build_tmp'), # Isolation directory workspace
         "--hidden-import=flight_tracker",
         "--hidden-import=tkinter",
         "--hidden-import=matplotlib",
@@ -134,8 +142,8 @@ def build_with_pyinstaller(py_bin: Path, pip_bin: Path) -> None:
         "--hidden-import=selenium",
         "--hidden-import=pystray",
         "--hidden-import=PIL",
-        "--hidden-import=plyer",  # Include plyer engine explicitly
-        str(bootstrap_py),  # Target the root-level bootstrap script
+        "--hidden-import=plyer",                 # Include plyer engine explicitly
+        str(bootstrap_py),                       # Target the root-level bootstrap script
     ]
 
     try:

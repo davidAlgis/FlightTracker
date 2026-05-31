@@ -46,6 +46,14 @@ class FlightBotGUI(tk.Tk):
     """Tkinter GUI for configuring and running FlightBot with system-tray support."""
 
     def __init__(self):
+        # Fix 2: Force Taskbar ID grouping immediately on instantiation
+        if os.name == "nt":
+            import ctypes
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("flightbot.pricemonitor.app.v1")
+            except Exception:
+                pass
+
         super().__init__()
         self.title("Flight Price Monitor")
         self.resizable(True, True)
@@ -56,7 +64,7 @@ class FlightBotGUI(tk.Tk):
         except tk.TclError:
             pass
 
-        # NEW: Variable for the checkbox
+        # Variable for the checkbox
         self.buy_direct_var = tk.BooleanVar(value=False)
 
         self._configure_grid()
@@ -64,6 +72,9 @@ class FlightBotGUI(tk.Tk):
         self._create_result_frame()
         self._create_status_panel()
         self._create_menu()
+        
+        # Initialize default state mapping before threading completes
+        self.code_to_name = {}
         self._load_airport_names()
 
         # state and managers
@@ -76,7 +87,7 @@ class FlightBotGUI(tk.Tk):
         self._monitor_thread = None
         self._current_bot: FlightBot | None = None
 
-        # After any cancel, require explicit Start click (no auto-start)
+        # After any user cancel, require explicit Start click (no auto-start)
         self._allow_auto_start = True
 
         # tray icon
@@ -386,73 +397,40 @@ class FlightBotGUI(tk.Tk):
 
     def _load_airport_names(self):
         """
-        Load IATA->airport-name map from OurAirports CSV.
-        If the download fails (e.g., no internet or SSL error), use a local fallback or retry.
+        Load IATA->airport-name map from OurAirports CSV asynchronously to prevent startup hang.
         """
-        import ssl
-        import urllib.error
-
-        retry_ms = 60_000  # 1 minute
-
-        # Try to load from URL, with SSL context to handle verification
-        try:
-            context = ssl._create_unverified_context()
-            df = pd.read_csv(AirportFromDistance.AIRPORTS_URL)
-        except (urllib.error.URLError, ssl.SSLCertVerificationError) as e:
-            # Try to load from local file if available
-            local_path = self._asset_path("airports.csv")
-            if os.path.exists(local_path):
-                df = pd.read_csv(local_path)
-            else:
-                # Ensure the map exists, even if empty
-                if (
-                    not hasattr(self, "code_to_name")
-                    or self.code_to_name is None
-                ):
-                    self.code_to_name = {}
-                # Soft status hint; ignore if status_label not ready yet
-                try:
-                    self.status_label.config(
-                        text="Status: offline, retrying in 1 min (SSL error)"
-                    )
-                except Exception:
-                    pass
-
-                # Schedule a single retry if none is pending
-                def _retry():
-                    self._airport_retry_id = None
-                    self._load_airport_names()
-
-                if (
-                    not hasattr(self, "_airport_retry_id")
-                    or self._airport_retry_id is None
-                ):
-                    try:
-                        self._airport_retry_id = self.after(retry_ms, _retry)
-                    except Exception:
-                        # If after() is not available yet, try again on next call path
-                        self._airport_retry_id = None
-                return
-
-        # Success path: build the code->name map
-        self.code_to_name = {
-            c: n for c, n in zip(df["iata_code"], df["name"]) if pd.notna(c)
-        }
-        # Cancel any pending retry now that data is loaded
-        if (
-            hasattr(self, "_airport_retry_id")
-            and self._airport_retry_id is not None
-        ):
+        def _async_load_worker():
+            import ssl
+            import urllib.error
+            df = None
+            
             try:
-                self.after_cancel(self._airport_retry_id)
+                context = ssl._create_unverified_context()
+                df = pd.read_csv(AirportFromDistance.AIRPORTS_URL)
             except Exception:
-                pass
-            self._airport_retry_id = None
-        # Optional: refresh status
-        try:
-            self.status_label.config(text="Status: data loaded")
-        except Exception:
-            pass
+                # Immediately look for local fallback asset on network drop/timeout
+                local_path = self._asset_path("airports.csv")
+                if os.path.exists(local_path):
+                    try:
+                        df = pd.read_csv(local_path)
+                    except Exception:
+                        pass
+                        
+            if df is not None:
+                code_map = {
+                    c: n for c, n in zip(df["iata_code"], df["name"]) if pd.notna(c)
+                }
+                # Safely post mapping variable back onto main thread loop
+                self.after(0, lambda: self._finalize_airport_loading(code_map, "Status: data loaded"))
+            else:
+                self.after(0, lambda: self.status_label.config(text="Status: offline (no airport data)"))
+
+        # Fire worker thread out of initial process context immediately
+        threading.Thread(target=_async_load_worker, daemon=True).start()
+
+    def _finalize_airport_loading(self, code_map, status_text):
+        self.code_to_name = code_map
+        self.status_label.config(text=status_text)
 
     def _load_saved_config(self):
         """Restore last inputs and resolved codes from config.json."""
@@ -1708,13 +1686,26 @@ class FlightBotGUI(tk.Tk):
         self.destroy()
 
     def _create_tray_icon(self):
-        icon_path = self._asset_path("flight_tracker.ico")
-        if os.path.exists(icon_path):
-            img = Image.open(icon_path)
-        else:
-            img = Image.new("RGB", (16, 16), "white")
+        icon_path_ico = self._asset_path("flight_tracker.ico")
+        icon_path_png = self._asset_path("flight_tracker.png")
+        img = None
+
+        if os.path.exists(icon_path_png):
+            try:
+                img = Image.open(icon_path_png).convert("RGBA")
+            except Exception:
+                pass
+
+        if img is None and os.path.exists(icon_path_ico):
+            try:
+                img = Image.open(icon_path_ico).convert("RGBA")
+            except Exception:
+                pass
+
+        if img is None:
+            img = Image.new("RGBA", (16, 16), (255, 255, 255, 0))
             d = ImageDraw.Draw(img)
-            d.rectangle((2, 2, 13, 13), fill="black")
+            d.ellipse((1, 1, 14, 14), fill=(9, 132, 227, 255))
 
         menu = pystray.Menu(
             pystray.MenuItem("Restore", self._restore),
@@ -1728,10 +1719,15 @@ class FlightBotGUI(tk.Tk):
         import sys
 
         if getattr(sys, "frozen", False):
-            root = os.path.dirname(sys.executable)
+            root = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+            # Fix 3: Scan both the folder mirror and root directory structures
+            path_dir = os.path.join(root, "assets", *parts)
+            if os.path.exists(path_dir):
+                return path_dir
+            return os.path.join(root, *parts)
         else:
             root = os.path.dirname(os.path.dirname(__file__))
-        return os.path.join(root, "assets", *parts)
+            return os.path.join(root, "assets", *parts)
 
     def _weights_path(self) -> str:
         cfg_path = getattr(self.config_mgr, "path", "config.json")
@@ -2258,14 +2254,14 @@ class FlightBotGUI(tk.Tk):
         rand_added = 0
         tries = 0
 
-        dd_all = list(dates_pool)
+        text_all = list(dates_pool)
         while rand_added < q_rand and tries < q_rand * 20:
             tries += 1
-            if not deps_pool or not dests_pool or not dd_all or not durations:
+            if not deps_pool or not dests_pool or not text_all or not durations:
                 break
             d = rng.choice(deps_pool)
             b = rng.choice(dests_pool)
-            dd = rng.choice(dd_all)
+            dd = rng.choice(text_all)
             dur = rng.choice(durations)
             rd = _ret_date(dd, dur)
             cand = (d, b, dd, rd)
